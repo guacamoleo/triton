@@ -25,6 +25,7 @@
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include <stdio.h>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -37,6 +38,23 @@ using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 
 using ValueTable = std::map<std::array<int, 3>, Value>;
+
+// The bitmask that encodes kinds of the instructions from AMD ISA.
+// The bitmask is used for providing instruction scheduling hints.
+enum InstructionKindMask {
+  NONE =        0x0000,
+  ALL_ALU =     0x0001,
+  VALU =        0x0002,
+  SALU =        0x0004,
+  MFMA =        0x0008,
+  ALL_VMEM =    0x0010,
+  VMEM_READ =   0x0020,
+  VMEM_WRITE =  0x0040,
+  ALL_DS =      0x0080,
+  DS_READ =     0x0100,
+  DS_WRITE =    0x0200,
+  TRANSCEND =   0x0400
+};
 
 void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
                              int32_t maskValue, int sizeValue,
@@ -273,7 +291,38 @@ struct DotOpMFMAConversionHelper {
                 extract_element(dstElemTy, acc, i32_val(v));
           }
         }
+        // Add sched.group.barrier to 1st region.
         if (numRepM == 8 && m == 3) {
+          printf("Adding Pre SchedGroupBarriers.\n");
+#if 0
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
+          // barrier
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+#elif 0
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
+          // barrier
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,    14, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
+#endif
+        }
+        // Add sched.barrier(0) between regions.
+        if (numRepM == 8 && m == 3) {
+#if 1
+          printf("Adding SchedBarrier(0)\n");
           const char *intrinsicName = "llvm.amdgcn.sched.barrier";
           LLVM::FastmathFlagsAttr defaultFlags{};
 
@@ -281,23 +330,33 @@ struct DotOpMFMAConversionHelper {
               LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(0));
           LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName,
                                           TypeRange{}, ValueRange{mask});
-          createSchedGroupBarrier(rewriter, loc, 8, 8, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
-          createSchedGroupBarrier(rewriter, loc, 512, 1, 0);
-          createSchedGroupBarrier(rewriter, loc, 8, 7, 0);
+#endif
+        }
+        // Add sched.group.barrier to 2nd region.
+        if (numRepM == 8 && m == 3) {
+          printf("Adding Post SchedGroupBarriers.\n");
+#if 0
+          // almost obeyed
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       32, 0);
+          // s_barrier
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        8, 0);
+#elif 0
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    4, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    4, 0);
+#endif
+
+/*
+ * sched.group created during IR Dump Before ConvertTritonAMDGPUToLLVM (convert-triton-amdgpu-to-llvm)
+ * llvm.call_intrinsic "llvm.amdgcn.sched.group.barrier"(%7064, %7065, %7066) : (i32, i32, i32) -> () loc(#loc41)
+*/
         }
       }
     }

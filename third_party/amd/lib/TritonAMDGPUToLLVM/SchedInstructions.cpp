@@ -5,6 +5,7 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include <stdio.h>
 
 namespace mlir::triton {
 #define GEN_PASS_DEF_TRITONAMDGPUINSERTINSTRUCTIONSCHEDHINTS
@@ -327,12 +328,14 @@ struct InstructionSchedHintsRewriter
           schedulingType == SchedulingType::IGLP1);
     Location loc = instructionSchedHint->getLoc();
     Block *block = instructionSchedHint->getBlock();
+#if 1
     if (limitSchedulingRange) {
+      printf("Adding SchedBarrier(0) to limit scheduling range.\n");
       rewriter.setInsertionPointToStart(block);
       createSchedBarrier(rewriter, loc,
                          mlir::amdgpu::sched_barrier_opt_enum::none);
     }
-
+#endif
     rewriter.setInsertionPoint(block, std::prev(block->end()));
 
     switch (schedulingType) {
@@ -352,11 +355,11 @@ struct InstructionSchedHintsRewriter
       break;
     }
     }
-
+#if 0
     if (limitSchedulingRange)
       createSchedBarrier(rewriter, loc,
                          mlir::amdgpu::sched_barrier_opt_enum::none);
-
+#endif
     /*
     // Try to schedule ds_write and mfma
     createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, 0);
