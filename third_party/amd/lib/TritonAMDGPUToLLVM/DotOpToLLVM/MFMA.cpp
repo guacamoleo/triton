@@ -72,6 +72,15 @@ void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
                                   ValueRange{mask, size, groupId});
 };
 
+void createSchedBarrier(PatternRewriter &rewriter, Location loc,
+                        int32_t maskValue) {
+  const char *intrinsicName = "llvm.amdgcn.sched.barrier";
+  Value mask =
+      LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(maskValue));
+  LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName, TypeRange{},
+                                  ValueRange{mask});
+}
+
 struct DotOpMFMAConversionHelper {
   AMDMfmaEncodingAttr mfmaLayout;
 
@@ -242,6 +251,8 @@ struct DotOpMFMAConversionHelper {
     auto numRepK = repA[2];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
+    printf("numRep M=%li, N=%li, K=%li, B=%li\n",
+       numRepM, numRepN, numRepK, numRepB);
 
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
@@ -258,14 +269,62 @@ struct DotOpMFMAConversionHelper {
     // instruction. subBlocks
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
+    printf("subBlocks=%i\n", subBlocks);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
 
     // assert(numRepM == 8 && "numRepM != 8");
-
+    printf("elemsPerVec=%u\n", elemsPerVec);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
-    for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
+
+
+/*
+            correctness, 1st ds_read location
+BK=0, K=0   valid, valid
+BK=0, K=1   valid, valid
+BK=1, K=0   NOT, NOT
+BK=1, K=1   NOT, NOT
+  removing inter-block sched.barriers returns to correctness
+  still keeps reduction in registers, but not great per
+*/    
+#define BLOCK_K_OUTER 0
+#define K_OUTER 0
+#define MFMA_SCHED_BARRIER 0
+    // BlockSize & NumBlocks.
+    int blockSizeM = 2;
+    int blockSizeN = 2;
+    int blockSizeK = 1;
+    int blockSizeB = 1;
+    assert(numRepM % blockSizeM == 0);
+    assert(numRepN % blockSizeN == 0);
+    assert(numRepK % blockSizeK == 0);
+    assert(numRepB % blockSizeB == 0);
+    int numBlocksM = numRepM / blockSizeM;
+    int numBlocksN = numRepN / blockSizeN;
+    int numBlocksK = numRepK / blockSizeK;
+    int numBlocksB = numRepB / blockSizeB;
+#if BLOCK_K_OUTER
+    for (int blockK = 0; blockK < numBlocksK; ++blockK) {
+#endif
+    for (int blockM = 0; blockM < numBlocksM; ++blockM) {
+    for (int blockN = 0; blockN < numBlocksN; ++blockN) {
+#if BLOCK_K_OUTER==0
+    for (int blockK = 0; blockK < numBlocksK; ++blockK) {
+#endif
+    for (int blockB = 0; blockB < numBlocksB; ++blockB) {
+      printf("bM=%i, bN=%i, bK=%i, bB=%i\n",
+          blockM, blockN, blockK, blockB);
+
+    int blockStartM = blockM * blockSizeM;
+    int blockStartN = blockN * blockSizeN;
+    int blockStartK = blockK * blockSizeK;
+    int blockStartB = blockB * blockSizeB;
+#if K_OUTER
+    for (int k = blockStartK; k < blockStartK+blockSizeK; k++) {
+#endif
+    for (int b = blockStartB; b < blockStartB+blockSizeB; ++b) {
+      for (int m = blockStartM; m < blockStartM+blockSizeM; ++m) {
+        for (int n = blockStartN; n < blockStartN+blockSizeN; ++n) {
+          //printf("  b=%i, m=%i, n=%i\n", b, m, n);
           Value acc = undef(vecTy);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
             acc = insert_element(
@@ -275,7 +334,10 @@ struct DotOpMFMAConversionHelper {
                 i32_val(v));
           }
           acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numRepK; k++) {
+#if K_OUTER==0
+          for (int k = blockStartK; k < blockStartK+blockSizeK; k++) {
+#endif
+            //printf("    b=%i, m=%i, n=%i, k=%i\n", b, m, n, k);
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack)
               acc =
                   mfmaLayout.getIsTransposed()
@@ -283,61 +345,57 @@ struct DotOpMFMAConversionHelper {
                                        operandA[kPack][{b, m, k}], acc)
                       : generateMFMAOp(mfmaInsnName, operandA[kPack][{b, m, k}],
                                        operandB[kPack][{b, n, k}], acc);
-          }
+#if K_OUTER==0
+          } // k
+#endif
           acc = reduceSubBlocks(subBlocks, acc);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
             fc[b * numRepM * numRepN * elemsPerVec + m * numRepN * elemsPerVec +
                n * elemsPerVec + v] =
                 extract_element(dstElemTy, acc, i32_val(v));
           }
-        }
-        // Add sched.group.barrier to 1st region.
-        if (numRepM == 8 && m == 3) {
-          printf("Adding Pre SchedGroupBarriers.\n");
-#if 0
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
-          // barrier
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-#elif 0
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
-          // barrier
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,    14, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ,   4, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,     6, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       16, 0);
-#endif
-        }
-        // Add sched.barrier(0) between regions.
-        if (numRepM == 8 && m == 3) {
-#if 1
-          printf("Adding SchedBarrier(0)\n");
-          const char *intrinsicName = "llvm.amdgcn.sched.barrier";
-          LLVM::FastmathFlagsAttr defaultFlags{};
+        } // n
+      } // m
+    } // b
 
-          Value mask =
-              LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(0));
-          LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName,
-                                          TypeRange{}, ValueRange{mask});
+
+#if K_OUTER
+  } // k
 #endif
-        }
-        // Add sched.group.barrier to 2nd region.
-        if (numRepM == 8 && m == 3) {
-          printf("Adding Post SchedGroupBarriers.\n");
-#if 0
-          // almost obeyed
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       32, 0);
+
+    // At end of every M,N block, insert sched.barrier for MFMAs.
+#if MFMA_SCHED_BARRIER
+    printf("Adding SchedBarrier(!MFMA)\n");
+    int32_t mfmaMask = InstructionKindMask::VALU
+        | InstructionKindMask::SALU
+        // | InstructionKindMask::MFMA
+        | InstructionKindMask::ALL_VMEM
+        | InstructionKindMask::VMEM_READ
+        | InstructionKindMask::VMEM_WRITE
+        | InstructionKindMask::ALL_DS
+        | InstructionKindMask::DS_READ
+        | InstructionKindMask::DS_WRITE
+        | InstructionKindMask::TRANSCEND;
+    createSchedBarrier(rewriter, loc, mfmaMask);
+#endif
+    } // blockB
+    } // blockN
+    } // blockM
+
+    // Add sched.barrier(0) between 1st and 2nd half of mfmas.
+#if BLOCK_K_OUTER==0
+    if (blockM == numBlocksM / 2-1) {
+#else
+    if (blockK == numBlocksK/2-1) {
+#endif
+      createSchedBarrier(rewriter, loc, InstructionKindMask::NONE);
+    }
+
+    } // blockK
+
+    // and very end of kernel, break up ds_writes
+    if (false) {
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       40, 0);
           // s_barrier
           createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
           createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
@@ -346,20 +404,9 @@ struct DotOpMFMAConversionHelper {
           createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
           createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
           createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        8, 0);
-#elif 0
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    4, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    4, 0);
-#endif
-
-/*
- * sched.group created during IR Dump Before ConvertTritonAMDGPUToLLVM (convert-triton-amdgpu-to-llvm)
- * llvm.call_intrinsic "llvm.amdgcn.sched.group.barrier"(%7064, %7065, %7066) : (i32, i32, i32) -> () loc(#loc41)
-*/
-        }
-      }
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        8, 0);
     }
+
     // replace with new packed result
     Type structTy = LLVM::LLVMStructType::getLiteral(
         ctx, SmallVector<Type>(fc.size(), dstElemTy));
