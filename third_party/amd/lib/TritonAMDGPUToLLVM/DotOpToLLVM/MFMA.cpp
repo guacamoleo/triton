@@ -285,10 +285,11 @@ BK=1, K=0   NOT, NOT
 BK=1, K=1   NOT, NOT
   removing inter-block sched.barriers returns to correctness
   still keeps reduction in registers, but not great per
+  invalid fixed by https://github.com/llvm/llvm-project/pull/112781
 */    
-#define BLOCK_K_OUTER 0
-#define K_OUTER 0
-#define MFMA_SCHED_BARRIER 0
+#define BLOCK_K_OUTER 1
+#define K_OUTER 1
+#define MFMA_SCHED_BARRIER 1
     // BlockSize & NumBlocks.
     int blockSizeM = 2;
     int blockSizeN = 2;
@@ -305,8 +306,8 @@ BK=1, K=1   NOT, NOT
 #if BLOCK_K_OUTER
     for (int blockK = 0; blockK < numBlocksK; ++blockK) {
 #endif
-    for (int blockM = 0; blockM < numBlocksM; ++blockM) {
     for (int blockN = 0; blockN < numBlocksN; ++blockN) {
+    for (int blockM = 0; blockM < numBlocksM; ++blockM) {
 #if BLOCK_K_OUTER==0
     for (int blockK = 0; blockK < numBlocksK; ++blockK) {
 #endif
@@ -324,7 +325,7 @@ BK=1, K=1   NOT, NOT
     for (int b = blockStartB; b < blockStartB+blockSizeB; ++b) {
       for (int m = blockStartM; m < blockStartM+blockSizeM; ++m) {
         for (int n = blockStartN; n < blockStartN+blockSizeN; ++n) {
-          //printf("  b=%i, m=%i, n=%i\n", b, m, n);
+          //vi rprintf("  b=%i, m=%i, n=%i\n", b, m, n);
           Value acc = undef(vecTy);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
             acc = insert_element(
@@ -345,6 +346,25 @@ BK=1, K=1   NOT, NOT
                                        operandA[kPack][{b, m, k}], acc)
                       : generateMFMAOp(mfmaInsnName, operandA[kPack][{b, m, k}],
                                        operandB[kPack][{b, n, k}], acc);
+
+#if MFMA_SCHED_BARRIER*1
+    // create a nonsense group barrier to turn off bundling.
+    // createSchedGroupBarrier(rewriter, loc, InstructionKindMask::NONE, 1, 0);
+
+    printf("Adding SchedBarrier(!MFMA) every single.\n");
+    int32_t mfmaMask = InstructionKindMask::VALU
+        | InstructionKindMask::SALU
+        // | InstructionKindMask::MFMA
+        | InstructionKindMask::ALL_VMEM
+        | InstructionKindMask::VMEM_READ
+        | InstructionKindMask::VMEM_WRITE
+        | InstructionKindMask::ALL_DS
+        | InstructionKindMask::DS_READ
+        | InstructionKindMask::DS_WRITE
+        | InstructionKindMask::TRANSCEND;
+    createSchedBarrier(rewriter, loc, mfmaMask);
+#endif
+
 #if K_OUTER==0
           } // k
 #endif
@@ -364,8 +384,11 @@ BK=1, K=1   NOT, NOT
 #endif
 
     // At end of every M,N block, insert sched.barrier for MFMAs.
-#if MFMA_SCHED_BARRIER
-    printf("Adding SchedBarrier(!MFMA)\n");
+#if MFMA_SCHED_BARRIER*0
+    // create a nonsense group barrier to turn off bundling.
+    // createSchedGroupBarrier(rewriter, loc, InstructionKindMask::NONE, 1, 0);
+
+    printf("Adding SchedBarrier(!MFMA) every block.\n");
     int32_t mfmaMask = InstructionKindMask::VALU
         | InstructionKindMask::SALU
         // | InstructionKindMask::MFMA
@@ -388,23 +411,108 @@ BK=1, K=1   NOT, NOT
 #else
     if (blockK == numBlocksK/2-1) {
 #endif
-      createSchedBarrier(rewriter, loc, InstructionKindMask::NONE);
+      //createSchedBarrier(rewriter, loc, InstructionKindMask::NONE);
     }
 
     } // blockK
 
     // and very end of kernel, break up ds_writes
     if (false) {
-          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       40, 0);
-          // s_barrier
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        1, 0);
-          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,    2, 0);
-          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,        8, 0);
+          // sched.barrier(0) has 64 mfmas after it
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, 0); // global_load ***
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, 0); // global_load ***
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   8, 0); // a0123, b0123
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a01 * b0123
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   4, 0); // a4567
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a23 * b0123
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, 0); // global_load ***
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   4, 0); // a0123'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a45 * b0123
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   4, 0); // b0123'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a67 * b0123
+
+          // half-way
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a01 * b0123
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   4, 0); // a4567'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a23 * b0123
+          // hope barrier is here
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     16, 0); // a45 * b0123
+          for (int w = 0; w < 8; ++w) {
+            createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     1, 0); // a6 * b0123
+            createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE, 1, 0);
+          }
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       8, 0); // a7 * b0123
+
+    }
+        if (false) {
+          // all 8 reads done in first quarter of mfmas but not right next to eachother.
+          int group_id = 0;
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 8, group_id);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     96, group_id);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE,  8, group_id);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     14, group_id);
+
+          //group_id++;          
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, group_id);
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,   8, group_id);
+          //createSchedGroupBarrier(rewriter, loc, InstructionKindMask::VMEM_READ, 4, group_id);
+
+          // no way to prevent wait(0) for ds_read right before barrier.
+          // only using 234 registers
+
+          // ds_writes are late and interleaved.
+          if (false) {
+          group_id++;
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     112, group_id);
+          for (int w = 0; w < 8; ++w) {
+            createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     1, group_id);
+            createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_WRITE, 1, group_id);
+          }
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,       8, group_id);
+          // above 2 groups return 554 TFlops
+          }
+
+#if 0
+          // first ds_reads
+          group_id++;
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  8, group_id);
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,   128, group_id);
+#endif
+#if 0
+          // last ds_reads
+          // 24 -> 549 TFlops
+          // 48 -> 100 TFlops, 256+53 vgprs
+          group_id++;
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  24, group_id); // a01 b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     24, group_id); // a01 b01
+#endif
+#if 0
+          // 389 TFlops
+          // vgprs 256+21
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a01 b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a23 b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a01 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a01 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a4567
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a23 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a23 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a45 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a45 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a01' b01'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a67 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a23' b23'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a67 * b23
+          // half-way
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a01 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a01 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::DS_READ,  4, group_id); // a4567'
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a23 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a23 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a45 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a45 * b23
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a67 * b01
+          createSchedGroupBarrier(rewriter, loc, InstructionKindMask::MFMA,     8, group_id); // a67 * b23
+#endif
     }
 
     // replace with new packed result
