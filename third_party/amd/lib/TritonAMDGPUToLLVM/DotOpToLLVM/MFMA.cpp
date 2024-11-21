@@ -38,6 +38,31 @@ using ::mlir::triton::gpu::SharedEncodingAttr;
 
 using ValueTable = std::map<std::array<int, 3>, Value>;
 
+// Bitmask that encodes instruction types for LLVM AMD scheduling hints.
+enum InstructionKindMask {
+  NONE =        0x0000,
+  ALL_ALU =     0x0001,
+  VALU =        0x0002,
+  SALU =        0x0004,
+  MFMA =        0x0008,
+  ALL_VMEM =    0x0010,
+  VMEM_READ =   0x0020,
+  VMEM_WRITE =  0x0040,
+  ALL_DS =      0x0080,
+  DS_READ =     0x0100,
+  DS_WRITE =    0x0200,
+  TRANSCEND =   0x0400
+};
+
+void createSchedBarrier(PatternRewriter &rewriter, Location loc,
+                        int32_t maskValue) {
+  const char *intrinsicName = "llvm.amdgcn.sched.barrier";
+  Value mask =
+      LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(maskValue));
+  LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName, TypeRange{},
+                                  ValueRange{mask});
+}
+
 struct DotOpMFMAConversionHelper {
   AMDMfmaEncodingAttr mfmaLayout;
 
@@ -208,7 +233,7 @@ struct DotOpMFMAConversionHelper {
     auto numRepK = repA[2];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
-
+    //printf("numRep: k=%li, b=%li, m=%li, n=%li\n", numRepK, numRepB, numRepM, numRepN);
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
         aTensorTy.getElementType());
@@ -227,36 +252,104 @@ struct DotOpMFMAConversionHelper {
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
 
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
-    for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
-          Value acc = undef(vecTy);
-          for (unsigned v = 0; v < elemsPerVec; ++v) {
-            acc = insert_element(
-                vecTy, acc,
-                fc[b * numRepM * numRepN * elemsPerVec +
-                   m * numRepN * elemsPerVec + n * elemsPerVec + v],
-                i32_val(v));
-          }
-          acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numRepK; k++) {
-            for (int kPack = 0; kPack < kWidth / kBase; ++kPack)
-              acc =
-                  mfmaLayout.getIsTransposed()
-                      ? generateMFMAOp(mfmaInsnName, operandB[kPack][{b, n, k}],
-                                       operandA[kPack][{b, m, k}], acc)
-                      : generateMFMAOp(mfmaInsnName, operandA[kPack][{b, m, k}],
-                                       operandB[kPack][{b, n, k}], acc);
-          }
-          acc = reduceSubBlocks(subBlocks, acc);
-          for (unsigned v = 0; v < elemsPerVec; ++v) {
-            fc[b * numRepM * numRepN * elemsPerVec + m * numRepN * elemsPerVec +
-               n * elemsPerVec + v] =
-                extract_element(dstElemTy, acc, i32_val(v));
-          }
-        }
-      }
+
+    // Order mfmas into tiles to improve vgpr allocation and scheduling.
+    // Ideally, a single tile should be the mfmas which belong to same ds_reads for A and B operands.
+    // For now, use 2x2 size ds_read_b128 reads 4 vgprs while mfma uses 2-vgpr operands.
+    const int tileSizeM = 2;
+    const int tileSizeN = 2;
+    const int numTilesM = numRepM / tileSizeM;
+    const int numTilesN = numRepN / tileSizeN;
+    // Num mfmas must evenly divide into tiles.
+    assert(numTilesM * tileSizeM == numRepM);
+    assert(numTilesN * tileSizeN == numRepN);
+
+    // Determine whether M or N should be outer and inner tile loop; smaller tile should be inner loop.
+    int tileSizeOuter = tileSizeM;
+    int tileSizeInner = tileSizeN;
+    int numTilesOuter = numTilesM;
+    int numTilesInner = numTilesN;
+    const bool preferMoreOuterTiles = true; // TODO(dtanner) tune during benchmarking; should be true to minimize vgprs.
+    const bool moreTilesN = numTilesN > numTilesM;
+    if (preferMoreOuterTiles == moreTilesN) {
+      // Switch to N being outer tile loop.
+      tileSizeOuter = tileSizeN;
+      tileSizeInner = tileSizeM;
+      numTilesOuter = numTilesN;
+      numTilesInner = numTilesM;
     }
+
+    for (int k = 0; k < numRepK; k++) {
+      for (int tileOuterIdx = 0; tileOuterIdx < numTilesOuter; ++tileOuterIdx) {
+        for (int tileInnerIdx = 0; tileInnerIdx < numTilesInner; ++tileInnerIdx) {
+          int tileStartM = tileOuterIdx * tileSizeOuter;
+          int tileStartN = tileInnerIdx * tileSizeInner;
+          if (preferMoreOuterTiles == moreTilesN) {
+            tileStartN = tileOuterIdx * tileSizeOuter;
+            tileStartM = tileInnerIdx * tileSizeInner;
+          }
+
+          for (int b = 0; b < numRepB; ++b) {
+            for (int m = tileStartM; m < tileStartM + tileSizeM; ++m) {
+              for (int n = tileStartN; n < tileStartN + tileSizeN; ++n) {
+                //printf("k=%i, b=%i, m=%i, n=%i\n", k, b, m, n);
+                Value acc = undef(vecTy);
+                for (unsigned v = 0; v < elemsPerVec; ++v) {
+                  acc = insert_element(
+                      vecTy, acc,
+                      fc[b * numRepM * numRepN * elemsPerVec +
+                        m * numRepN * elemsPerVec + n * elemsPerVec + v],
+                      i32_val(v));
+                }
+                acc = zeroAuxiliarBlocks(subBlocks, acc);
+                for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
+                  acc =
+                      mfmaLayout.getIsTransposed()
+                          ? generateMFMAOp(mfmaInsnName, operandB[kPack][{b, n, k}],
+                                           operandA[kPack][{b, m, k}], acc)
+                          : generateMFMAOp(mfmaInsnName, operandA[kPack][{b, m, k}],
+                                           operandB[kPack][{b, n, k}], acc);
+#if 1
+                  //printf("Adding SchedBarrier(!MFMA) every single.\n");
+                  // Mask every instruction type except for MFMA.
+                  int32_t mfmaMask = InstructionKindMask::VALU
+                      | InstructionKindMask::SALU
+                      | InstructionKindMask::ALL_VMEM
+                      | InstructionKindMask::VMEM_READ
+                      | InstructionKindMask::VMEM_WRITE
+                      | InstructionKindMask::ALL_DS
+                      | InstructionKindMask::DS_READ
+                      | InstructionKindMask::DS_WRITE
+                      | InstructionKindMask::TRANSCEND;
+                  createSchedBarrier(rewriter, loc, mfmaMask);
+#endif
+                }
+                acc = reduceSubBlocks(subBlocks, acc);
+                for (unsigned v = 0; v < elemsPerVec; ++v) {
+                  fc[b * numRepM * numRepN * elemsPerVec + m * numRepN * elemsPerVec +
+                    n * elemsPerVec + v] =
+                      extract_element(dstElemTy, acc, i32_val(v));
+                }
+              } // n
+            } // m
+          } // b
+#if 0
+          //printf("Adding SchedBarrier(!MFMA) every tile.\n");
+          // Mask every instruction type except for MFMA.
+          int32_t mfmaMask = InstructionKindMask::VALU
+              | InstructionKindMask::SALU
+              | InstructionKindMask::ALL_VMEM
+              | InstructionKindMask::VMEM_READ
+              | InstructionKindMask::VMEM_WRITE
+              | InstructionKindMask::ALL_DS
+              | InstructionKindMask::DS_READ
+              | InstructionKindMask::DS_WRITE
+              | InstructionKindMask::TRANSCEND;
+          createSchedBarrier(rewriter, loc, mfmaMask);
+#endif
+        } // inner tile
+      } // outer tile
+    } // k
     // replace with new packed result
     Type structTy = LLVM::LLVMStructType::getLiteral(
         ctx, SmallVector<Type>(fc.size(), dstElemTy));
