@@ -153,6 +153,7 @@ Operation *createIglpOpt(PatternRewriter &rewriter, Location loc, int value) {
 struct MachineDescr {
   virtual ~MachineDescr() = default;
   virtual uint32_t getDsReadIssueCycle(uint32_t instrWidth) = 0;
+  virtual uint32_t getDsWriteIssueCycle(uint32_t instrWidth) = 0;
   virtual FailureOr<uint32_t> getMmaExecCycle(llvm::ArrayRef<int64_t> dims) = 0;
   virtual uint32_t getMmaIssueCycle() = 0;
   virtual uint32_t getNumLdsDataPaths() = 0;
@@ -162,6 +163,12 @@ struct MachineDescr {
 template <typename Derived> struct MachineDescrImpl : MachineDescr {
   uint32_t getDsReadIssueCycle(uint32_t instrWidth) final {
     return instrWidth == 16 ? 8 : 4;
+  }
+
+  uint32_t getDsWriteIssueCycle(uint32_t instrWidth) final {
+    // TODO(dtanner) this is also based on ds_write pipeline bottleneck.
+    // ds_write_b128 ~ 64 cycles needs ~3 mfma_16's to hide it.
+    return instrWidth * 8;
   }
 
   FailureOr<uint32_t> getMmaExecCycle(llvm::ArrayRef<int64_t> dims) final {
@@ -404,6 +411,97 @@ struct InstructionSchedHintsRewriter
         ::mlir::LLVM::TargetFeaturesAttr::get(ctx, targetFeatures));
   }
 
+  // TODO(dtanner)
+  // Explicitly interleave mfmas between ds_writes (unless using pingpong),
+  // to hide the long ds_write issue latency.
+  void createDsWriteInterleave(
+      PatternRewriter &rewriter, Location loc,
+      triton::amdgpu::InstructionSchedHint schedHint) const {
+    llvm::dbgs() << "\ncreateDsWriteInterleave()\n";
+
+    // ds_write instructions.
+    const uint32_t numDsWriteInstA = schedHint.getNumDsWritesA().getValue();
+    const uint32_t numDsWriteInstB = schedHint.getNumDsWritesB().getValue();
+    const auto dsWriteAType =
+        cast<VectorType>(schedHint.getNumDsWritesA().getType());
+    const auto dsWriteBType =
+        cast<VectorType>(schedHint.getNumDsWritesB().getType());
+    llvm::dbgs() << "dsWriteInstA: " << numDsWriteInstA << " * "
+                 << dsWriteAType.getShape()[0] << " elem\n";
+    llvm::dbgs() << "dsWriteInstB: " << numDsWriteInstB << " * "
+                 << dsWriteBType.getShape()[0] << " elem\n";
+    const uint32_t dsWriteIssueCycleA =
+        this->machineDescr->getDsWriteIssueCycle(dsWriteAType.getShape()[0]);
+    const uint32_t dsWriteIssueCycleB =
+        this->machineDescr->getDsWriteIssueCycle(dsWriteBType.getShape()[0]);
+    llvm::dbgs() << "dsWriteIssueCycle: " << dsWriteIssueCycleA << ", "
+                 << dsWriteIssueCycleB << "\n";
+
+    // mfma instructions.
+    const uint32_t numMmaInst = schedHint.getNumMMAs().getValue();
+    auto mmaType = cast<RankedTensorType>(schedHint.getNumMMAs().getType());
+    auto maybeMmaExecCycle = machineDescr->getMmaExecCycle(mmaType.getShape());
+    if (llvm::failed(maybeMmaExecCycle)) {
+      schedHint.emitError("unknown mma instruction type");
+      return;
+    }
+    const uint32_t mmaExecCycle = maybeMmaExecCycle.value();
+    llvm::dbgs() << "numMmaInst: " << numMmaInst << " * " << mmaExecCycle
+                 << " exec cycles\n";
+
+    // LDS writes issue cycles are due to large write size and limited queue
+    // depth. Assume 1 inter-wave mfma will hide some issue cycles and remaining
+    // cycles must be hidden intra-wave.
+    int numMfmasPerDsWriteA = (dsWriteIssueCycleA / mmaExecCycle) - 1;
+    int numMfmasPerDsWriteB = (dsWriteIssueCycleB / mmaExecCycle) - 1;
+    llvm::dbgs() << "numMfmasPerDsWrite: " << numMfmasPerDsWriteA << ", "
+                 << numMfmasPerDsWriteB << "\n";
+
+    // Don't use more than 1/4th of mfmas for ds_write-issue hiding.
+    const float mfma_frac = 0.25;
+    const int max_mfmas_use = static_cast<int>(numMmaInst * mfma_frac);
+    assert((numMfmasPerDsWriteA * numDsWriteInstA) +
+               (numMfmasPerDsWriteB * numDsWriteInstB) <
+           max_mfmas_use);
+
+    int schedGroupId = 1;
+    // local store A
+    for (size_t idswrite = 0; idswrite < numDsWriteInstA; ++idswrite) {
+      llvm::dbgs() << "createSchedGroupBarrier() A\n";
+      createSchedGroupBarrier(
+          rewriter, loc,
+          mlir::amdgpu::sched_barrier_opt_enum::ds_write, // 512
+          1, schedGroupId);
+      createSchedGroupBarrier(
+          rewriter, loc,
+          mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma, // 8
+          numMfmasPerDsWriteA, schedGroupId);
+    }
+
+    // local store B
+    for (size_t idswrite = 0; idswrite < numDsWriteInstB; ++idswrite) {
+      llvm::dbgs() << "createSchedGroupBarrier() B\n";
+      createSchedGroupBarrier(rewriter, loc,
+                              mlir::amdgpu::sched_barrier_opt_enum::ds_write, 1,
+                              schedGroupId);
+      createSchedGroupBarrier(rewriter, loc,
+                              mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma,
+                              numMfmasPerDsWriteB, schedGroupId);
+    }
+    // TODO(dtanner) do we need to end with some mfmas?
+
+    // Disable combining _b64 ops as this will change the number of ops.
+    auto funcOp = schedHint->getParentOfType<LLVM::LLVMFuncOp>();
+    MLIRContext *ctx = schedHint->getContext();
+    llvm::SmallVector<StringAttr> targetFeatures;
+    if (auto attr = funcOp.getTargetFeatures()) {
+      llvm::copy(attr->getFeatures(), std::back_inserter(targetFeatures));
+    }
+    targetFeatures.push_back(str_attr("-load-store-opt"));
+    funcOp.setTargetFeaturesAttr(
+        ::mlir::LLVM::TargetFeaturesAttr::get(ctx, targetFeatures));
+  }
+
   LogicalResult
   matchAndRewrite(triton::amdgpu::InstructionSchedHint instructionSchedHint,
                   PatternRewriter &rewriter) const override {
@@ -436,6 +534,12 @@ struct InstructionSchedHintsRewriter
       break;
     case mlir::triton::amdgpu::SchedHint::local_prefetch:
       createLocalPrefetchSchedule(rewriter, loc, instructionSchedHint);
+      break;
+    case mlir::triton::amdgpu::SchedHint::local_store_interleave:
+      // Interleave mfmas with ds_writes to hide their long istruction issue
+      // latency. Should not be used with ping-pong, but otherwise should be
+      // beneficial.
+      createDsWriteInterleave(rewriter, loc, instructionSchedHint);
       break;
     case mlir::triton::amdgpu::SchedHint::none:
     default:

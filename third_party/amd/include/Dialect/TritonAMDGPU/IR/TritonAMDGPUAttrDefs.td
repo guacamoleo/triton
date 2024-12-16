@@ -75,6 +75,7 @@ def SchedHintCaseNone : I32EnumAttrCase<"none", 0>;
 def SchedHintCaseLLVMIglp0 : I32EnumAttrCase<"llvm_iglp_0", 1>;
 def SchedHintCaseLLVMIglp1 : I32EnumAttrCase<"llvm_iglp_1", 2>;
 def SchedHintCaseLocalPrefetch : I32EnumAttrCase<"local_prefetch", 3>;
+def SchedHintCaseLocalStoreInterleave : I32EnumAttrCase<"local_store_interleave", 4>;
 
 def TritonAMDGPU_SchedHintsEnum : TritonAMDGPU_I32Enum<
   "SchedHint", "Instruction Scheduling Hints for AMD GPUs", [
@@ -82,6 +83,7 @@ def TritonAMDGPU_SchedHintsEnum : TritonAMDGPU_I32Enum<
     SchedHintCaseLLVMIglp0,
     SchedHintCaseLLVMIglp1,
     SchedHintCaseLocalPrefetch,
+    SchedHintCaseLocalStoreInterleave,
   ]>;
 
 def TritonAMDGPU_SchedHintVariantAttr :
