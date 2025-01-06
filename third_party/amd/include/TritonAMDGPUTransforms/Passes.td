@@ -139,4 +139,15 @@ def TritonAMDGPUBlockPingpong: Pass<"tritonamdgpu-block-pingpong", "mlir::Module
   let dependentDialects = ["mlir::ROCDL::ROCDLDialect, mlir::triton::amdgpu::TritonAMDGPUDialect"];
 }
 
+def TritonAMDGPUTileTensors: Pass<"tritonamdgpu-tile-tensors", "mlir::ModuleOp"> {
+  let summary = "Tile accumulator tensors along M and N.";
+
+  let description = [{
+    TODO(guacamoleo)
+  }];
+
+  let constructor = "mlir::createTritonAMDGPUTileTensorsPass()";
+
+  let dependentDialects = ["mlir::ROCDL::ROCDLDialect, mlir::triton::amdgpu::TritonAMDGPUDialect"];
+}
 #endif
