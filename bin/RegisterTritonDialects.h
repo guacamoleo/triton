@@ -96,6 +96,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
 
   // NVGPU transform passes
   mlir::registerNVHopperTransformsPasses();
+  mlir::triton::registerTritonAMDGPURefineOps();
 
   registry.insert<
       mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
