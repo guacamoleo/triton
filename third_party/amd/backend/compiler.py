@@ -266,7 +266,6 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_membar_analysis(pm)
         amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch)
         passes.common.add_canonicalizer(pm)
-        print("compiler.py::make_llir()\n")
 
         # Emit and read custom ttgir.
         pm.run(mod)
@@ -285,7 +284,7 @@ class HIPBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        # Resume normal compilation with 
+        # Resume normal compilation
         passes.common.add_canonicalizer(pm)
         #amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
         ## __HIP_FTZ is used to control the denorm flushing behavior of exp2 op as follows:

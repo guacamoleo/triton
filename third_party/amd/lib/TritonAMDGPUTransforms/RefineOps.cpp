@@ -292,8 +292,6 @@ struct DotOpMFMAConverter {
     // Calculate dot-tile shape (in reps per dot-tile).
     DotTileShapeType tileShape =
         calcDotTileShape(mfmasPerRep, preferTileLargerM, cyclesPerMfma);
-    tileShape[0] = 2; // TODO remove
-    tileShape[1] = 2; // TODO remove
     tileShape[0] = std::min(tileShape[0], static_cast<unsigned>(numRepM));
     tileShape[1] = std::min(tileShape[1], static_cast<unsigned>(numRepN));
     tileShape[2] = std::min(tileShape[2], static_cast<unsigned>(numRepK));
