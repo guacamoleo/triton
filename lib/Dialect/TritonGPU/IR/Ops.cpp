@@ -660,6 +660,7 @@ LogicalResult MemDescSubviewOp::verify() {
   // There are two cases:
   // 1. The subview is rank-reducing
   //  - We split along the first dimension. It can be with non-constant offsets
+  //  (TODO: ajust)
   if (srcTy.getRank() != dstTy.getRank()) {
     if (srcTy.getRank() - dstTy.getRank() != 1) {
       return emitError(
@@ -670,10 +671,6 @@ LogicalResult MemDescSubviewOp::verify() {
       if (!matchPattern(offset, m_ConstantInt(&value))) {
         return emitError("only constant values are allowed outside the front "
                          "dimension in a rank-reducing subview");
-      }
-      if (!value.isZero()) {
-        return emitError(
-            "only first offset can be non-zero for a rank-reducing subview");
       }
     }
     return success();
