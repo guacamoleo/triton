@@ -41,9 +41,10 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
     pm.addPass(mlir::createTritonAMDGPUMembarAnalysisPass());
   });
   m.def("add_refine_amdgpu_ops",
-        [](mlir::PassManager &pm, const std::string &arch) {
+        [](mlir::PassManager &pm, const std::string &arch,
+           const std::string &granularity) {
           pm.addNestedPass<mlir::triton::FuncOp>(
-              mlir::createTritonAMDGPURefineOpsPass(arch));
+              mlir::createTritonAMDGPURefineOpsPass(arch, granularity));
         });
   m.def("add_reschedule_amdgpu_ops",
         [](mlir::PassManager &pm, const std::string &arch) {

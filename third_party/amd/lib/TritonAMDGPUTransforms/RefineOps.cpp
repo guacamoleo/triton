@@ -38,6 +38,16 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &stream, SmallVector<T> vec) {
 }
 
 namespace {
+
+// SMALL granularity means refinement tries to tile as much as possible
+// SEM granularity stands for semantic, it do not tile smaller than semantics of
+// original layout permits. For example non transposed MFMA 32x32 layout has
+// thread+lane tile shape 8x32, but semantically this small tile does not make
+// sense and MFMA tensor with small shape will just broadcast values in
+// registers. SMALL granularity will use generic linear layout to overcome
+// broadcasting.
+enum class GranularityType { SMALL, SEM };
+
 SmallVector<Value> createOffset(llvm::ArrayRef<Value> valueOffset,
                                 llvm::ArrayRef<int64_t> intOffset,
                                 OpBuilder &rewriter, Location loc) {
@@ -62,9 +72,45 @@ inline RankedTensorType rankedTType(Value tensor) {
   return cast<RankedTensorType>(tensor.getType());
 }
 
-SmallVector<unsigned> getRefinedShapePerCTATile(Type type) {
+SmallVector<int64_t> getRefinedShapePerCTATile(RankedTensorType tensorType) {
+  auto rawShape = mlir::triton::gpu::getShapePerCTATile(tensorType);
+  // Need this loop to cast unsigned emitted from getShapePerCTATile to int64_t
+  return llvm::to_vector_of<int64_t>(rawShape);
+}
+
+SmallVector<int64_t>
+getRefinedShapePerSemanticTile(RankedTensorType tensorType) {
+  // choose smallest supported tile
+  auto refinedShape = getRefinedShapePerCTATile(tensorType);
+  auto origEncoding = tensorType.getEncoding();
+  auto ctaTileLL = ttg::toLinearLayout(refinedShape, origEncoding);
+  auto ctx = tensorType.getContext();
+  StringAttr kReg = StringAttr::get(ctx, "register");
+  // If we choose refineShape smaller than permitted by layout semantic
+  // we will still have zero register bases.
+  // Count them and cut full layout to this number of register bases.
+  auto numSemanticRegisterBases = ctaTileLL.getInDimSizeLog2(kReg);
+  auto fullShapeLL = ttg::toLinearLayout(tensorType.getShape(), origEncoding);
+  LinearLayout::BasesT newBases = fullShapeLL.getBases();
+  newBases[kReg].resize(numSemanticRegisterBases);
+  SmallVector<StringAttr> outDimNames =
+      llvm::to_vector(ctaTileLL.getOutDimNames());
+  auto semanticTileSize =
+      llvm::to_vector(LinearLayout(newBases, outDimNames).getOutDimSizes());
+  return llvm::to_vector_of<int64_t, ArrayRef<int32_t>>(semanticTileSize);
+}
+
+SmallVector<int64_t> getRefinedShape(Type type, GranularityType granularity) {
   auto tensorType = cast<mlir::RankedTensorType>(type);
-  return mlir::triton::gpu::getShapePerCTATile(tensorType);
+  switch (granularity) {
+  case GranularityType::SMALL:
+    return getRefinedShapePerCTATile(tensorType);
+  case GranularityType::SEM:
+    return getRefinedShapePerSemanticTile(tensorType);
+  default:
+    assert(false && "unsupported tile granularity");
+  }
+  return {};
 }
 
 struct RefinedBlock {
@@ -925,8 +971,26 @@ struct ReduceOpPattern : public RefineRewritePattern<triton::ReduceOp> {
 
 template <typename OpTy>
 struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
-  ElementWiseOpPattern(MLIRContext *context, PatternBenefit benefit = 1)
-      : RefineRewritePattern<OpTy>(context, benefit) {}
+  GranularityType granularity;
+
+  ElementWiseOpPattern(MLIRContext *context, PatternBenefit benefit = 1,
+                       GranularityType granularity = GranularityType::SMALL)
+      : RefineRewritePattern<OpTy>(context, benefit), granularity(granularity) {
+  }
+
+  ttg::DistributedEncodingTrait
+  refineElementwiseEncoding(Attribute origEncoding,
+                            ArrayRef<int64_t> refinedShape) const {
+    auto redundantLinearLayout =
+        ttg::toLinearLayout(refinedShape, origEncoding);
+    auto ctx = origEncoding.getContext();
+    StringAttr kReg = StringAttr::get(ctx, "register");
+    auto leanLinearLayout = redundantLinearLayout.removeZeroBasesAlongDim(kReg);
+    if (leanLinearLayout == redundantLinearLayout)
+      return cast<ttg::DistributedEncodingTrait>(origEncoding);
+    else
+      return ttg::LinearEncodingAttr::get(ctx, leanLinearLayout);
+  }
 
   // Refine ops with distributed layouts.
   // Assumes same layout for operands.
@@ -947,7 +1011,7 @@ struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
     auto srcShape = srcType.getShape();
     auto srcEncoding = srcType.getEncoding();
     auto srcLL = ttg::toLinearEncoding(srcType);
-    auto srcShapePerCtaTile = getRefinedShapePerCTATile(srcType);
+    auto srcShapePerCtaTile = getRefinedShape(srcType, granularity);
 
     // Verify subsequent operands match opd[0].
     for (int i = 1; i < numOperands; ++i) {
@@ -955,7 +1019,7 @@ struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
         return failure();
       if (rankedTType(op->getOperand(i)).getRank() != rank)
         return failure();
-      if (getRefinedShapePerCTATile(op->getOperand(i).getType()) !=
+      if (getRefinedShape(op->getOperand(i).getType(), granularity) !=
           srcShapePerCtaTile)
         return failure();
     }
@@ -976,7 +1040,7 @@ struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
     auto llRes = leRes.getLinearLayout();
 
     auto resEncoding = resType.getEncoding();
-    auto resShapePerCtaTile = getRefinedShapePerCTATile(resType);
+    auto resShapePerCtaTile = getRefinedShape(resType, granularity);
 
     // Calculate refined shapes.
     SmallVector<int64_t> refinedShape;
@@ -993,10 +1057,15 @@ struct ElementWiseOpPattern : public RefineRewritePattern<OpTy> {
       return success();
 
     // Create refined ops.
+    auto refinedSrcEncoding =
+        refineElementwiseEncoding(srcEncoding, refinedShape);
+    auto refinedResEncoding =
+        refineElementwiseEncoding(resEncoding, refinedShape);
+
     auto refinedTensorTypeSrc = RankedTensorType::get(
-        refinedShape, srcType.getElementType(), srcEncoding);
+        refinedShape, srcType.getElementType(), refinedSrcEncoding);
     auto refinedTensorTypeRes = RankedTensorType::get(
-        refinedShape, resType.getElementType(), resEncoding);
+        refinedShape, resType.getElementType(), refinedResEncoding);
 
     rewriter.setInsertionPointAfter(op);
     SmallVector<Value> refinedOps;
@@ -1284,8 +1353,9 @@ struct BroadcastOpPattern : public RefineRewritePattern<BroadcastOp> {
 
 struct TritonAMDGPURefineOps
     : public TritonAMDGPURefineOpsBase<TritonAMDGPURefineOps> {
-  explicit TritonAMDGPURefineOps(StringRef targetArch) {
+  explicit TritonAMDGPURefineOps(StringRef targetArch, StringRef granularity) {
     this->arch = targetArch.str();
+    this->granularity = granularity.str();
   }
 
   void runOnOperation() override {
@@ -1311,9 +1381,20 @@ struct TritonAMDGPURefineOps
     patterns.add<ExpandDimsOpPattern>(context, /*benefit=*/1);
     patterns.add<BroadcastOpPattern>(context, /*benefit=*/1);
 
+    GranularityType granType;
+    if (granularity == "small_tile") {
+      granType = GranularityType::SMALL;
+    } else if (granularity == "semantic_tile") {
+      granType = GranularityType::SEM;
+    } else {
+      func.emitError("unsupported granularity: '")
+          << this->granularity.getValue() << "'";
+      return signalPassFailure();
+    }
+
     // Elementwise patterns
 #define REFINE_ELEMENTWISE_OP(OP_TYPE)                                         \
-  patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, /*benefit=*/1);
+  patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, /*benefit=*/1, granType);
 
     REFINE_ELEMENTWISE_OP(math::RsqrtOp)
     REFINE_ELEMENTWISE_OP(math::Exp2Op)
@@ -1363,8 +1444,8 @@ struct TritonAMDGPURefineOps
 namespace mlir {
 
 std::unique_ptr<OperationPass<triton::FuncOp>>
-createTritonAMDGPURefineOpsPass(StringRef targetArch) {
-  return std::make_unique<TritonAMDGPURefineOps>(targetArch);
+createTritonAMDGPURefineOpsPass(StringRef targetArch, StringRef granularity) {
+  return std::make_unique<TritonAMDGPURefineOps>(targetArch, granularity);
 }
 
 } // namespace mlir

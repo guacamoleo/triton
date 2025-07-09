@@ -270,7 +270,7 @@ def TritonAMDGPUMembarAnalysis : Pass<"triton-amdgpu-membar-analysis", "mlir::Mo
 
 def TritonAMDGPURefineOps : Pass<"triton-amdgpu-refine-ops", "mlir::triton::FuncOp"> {
     let summary = "Convert Triton Ops to fine-grain ones";
-    let constructor = "mlir::createTritonAMDGPURefineOpsPass(\"\")";
+    let constructor = "mlir::createTritonAMDGPURefineOpsPass(\"\", \"\")";
 
     let dependentDialects = ["mlir::arith::ArithDialect",
                              "mlir::math::MathDialect",
@@ -283,7 +283,9 @@ def TritonAMDGPURefineOps : Pass<"triton-amdgpu-refine-ops", "mlir::triton::Func
 
     let options = [
         Option<"arch", "arch", "std::string", /*default*/"\"\"",
-               "gfx target device architecture, e.g., gfx942">
+               "gfx target device architecture, e.g., gfx942">,
+        Option<"granularity", "granularity", "std::string", /*default*/"\"\"",
+               "granularity of refinement, supported values: 'small_tile', 'semantic_tile'">
     ];
 }
 

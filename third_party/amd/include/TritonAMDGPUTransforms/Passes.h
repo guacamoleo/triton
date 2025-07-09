@@ -14,7 +14,7 @@ namespace mlir {
 std::unique_ptr<Pass> createTritonAMDGPUMembarAnalysisPass();
 
 std::unique_ptr<OperationPass<mlir::triton::FuncOp>>
-createTritonAMDGPURefineOpsPass(StringRef targetArch);
+createTritonAMDGPURefineOpsPass(StringRef targetArch, StringRef granularity);
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createTritonAMDGPURescheduleOpsPass(StringRef targetArch);

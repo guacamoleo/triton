@@ -297,7 +297,12 @@ class HIPBackend(BaseBackend):
 
         amd.passes.ttgpuir.add_allocate_shared_memory(pm)
         amd.passes.ttgpuir.add_membar_analysis(pm)
-        amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch)
+
+        import os
+        refinement_granularity = "semantic_tile"
+        if "TRITON_HIP_REFINE_GRANULARITY" in os.environ:
+            refinement_granularity = os.environ["TRITON_HIP_REFINE_GRANULARITY"]
+        amd.passes.ttgpuir.add_refine_amdgpu_ops(pm, options.arch, refinement_granularity)
         passes.common.add_canonicalizer(pm)
         amd.passes.ttgpuir.add_reschedule_amdgpu_ops(pm, options.arch)
         ## __HIP_FTZ is used to control the denorm flushing behavior of exp2 op as follows:
