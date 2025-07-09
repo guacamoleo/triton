@@ -214,7 +214,7 @@ struct DotOpMFMAConverter {
         shapeC[1] / warpsPerCTA[1],
         shapeA[1],
     };
-    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    auto mfmaVersion = mfmaLayout.getVersion();
     bool allowXF32 =
         dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
 

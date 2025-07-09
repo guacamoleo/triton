@@ -38,7 +38,7 @@ unsigned getCyclesPerMfma(DotOp dotOp) {
   auto nDim = mfmaLayout.getNDim();
   const auto kDimOperandSize = aTensorTy.getShape().back();
   // auto kDim = mfmaLayout.getKDim();
-  auto mfmaVersion = mfmaLayout.getVersionMajor();
+  auto mfmaVersion = mfmaLayout.getVersion();
   bool allowXF32 =
       dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
 
