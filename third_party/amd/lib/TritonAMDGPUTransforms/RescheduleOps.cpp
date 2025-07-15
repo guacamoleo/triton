@@ -392,7 +392,7 @@ struct SchedDag {
       Operation *op = &(*it);
       addOp(op);
     }
-    LDBG("SchedDag() nodeList");
+    LDBG("SchedDag() NodeList");
     LLVM_DEBUG(dumpNodes(llvm::dbgs()));
   }
 
@@ -447,7 +447,6 @@ struct SchedDag {
 
   // Removes dep from all depTypes
   int32_t removeDep(const SchedDep &dep) {
-    LDBG("removeDep(" << dep << ")");
     int32_t count = 0;
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
@@ -455,9 +454,6 @@ struct SchedDag {
       DepSet &depSet = depType.getSecond();
 
       int32_t erased = depSet.erase(dep);
-      if (erased) {
-        LDBG("  erased");
-      }
       count += erased;
     }
     return count;
@@ -501,7 +497,6 @@ struct SchedDag {
     c0 c1 c2
   */
   void removeNodeCascadeDeps(SchedDagNode *node) {
-    LDBG("removeNodeCascadeDeps() " << *node);
     // Add new dependencies first.
     for (auto parent : node->getParents()) {
       for (auto child : node->getChildren()) {
@@ -791,7 +786,6 @@ struct DataDependencyCalculator : DependencyCalculator {
           SchedDep dep;
           dep.parent = parentNode;
           dep.child = node;
-          LDBG("depSet.insert(dep)");
           depSet.insert(dep);
         }
       }
@@ -911,7 +905,6 @@ struct DataDependencyCalculator : DependencyCalculator {
 
   // Sched.bars block ops based on type.
   void calcDepsSchedBarMasks() {
-    LDBG("calcDepsSchedBar()");
     // For each node and type, track which nodes don't match the type.
     // This means any sched.bar, for each bit in the mask,
     // create deps between the bit
@@ -1021,17 +1014,11 @@ struct DataDependencyCalculator : DependencyCalculator {
   }
 
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsOperands();
-    LDBG("2");
     calcDepsLdsGpuBar<SchedDirection::BottomUp>();
-    LDBG("3");
     calcDepsLdsGpuBar<SchedDirection::TopDown>();
-    LDBG("4");
     calcDepsGpuBarGpuBar();
-    LDBG("5");
     calcDepsCfBr();
-    LDBG("6");
     calcDepsFullBars();
     if (hasSchedBarMasks()) {
       calcDepsSchedBarMasks();
@@ -1102,7 +1089,6 @@ struct RefinedOpDependencyCalculator : DependencyCalculator {
   }
 
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsRefinedOp();
     calcDepsDot();
   }
@@ -1152,7 +1138,6 @@ struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
   LocalLoadOrderDependencyCalculator()
       : DependencyCalculator("LocalLoadTypeOrder") {}
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsOpType<triton::gpu::LocalLoadOp>(&dag->nodeList, depSet);
   }
 };
@@ -1161,7 +1146,6 @@ struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
   LocalStoreOrderDependencyCalculator()
       : DependencyCalculator("LocalStoreTypeOrder") {}
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsOpType<triton::gpu::LocalStoreOp>(&dag->nodeList, depSet);
   }
 };
@@ -1170,7 +1154,6 @@ struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
   GlobalLoadOrderDependencyCalculator()
       : DependencyCalculator("GlobalLoadCategoryOrder") {}
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     calcDepsOpCategory(&dag->nodeList, depSet, opCategoryGlobalLoad);
   }
 };
@@ -1362,7 +1345,6 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
     with which other memory ops, or need a strict order.
   */
   void calcDeps() {
-    LDBG("DependencyCalculator<" << depTypeName << ">::calcDeps()");
     LLVM_DEBUG(dag->dumpDeps(llvm::dbgs()));
 
     SchedDag memDag = *dag;
@@ -1504,9 +1486,7 @@ struct SchedHeuristicOriginalOrder
   - Runs scheduler.
 ******************************************************************************/
 struct SchedManager {
-  SchedManager(Block *block) : dag(block), rescheduleId(0) {
-    LDBG("SchedManager()");
-  }
+  SchedManager(Block *block) : dag(block), rescheduleId(0) {}
 
   // Calculate new deps based on op order and previously determined deps.
   // Insert new deps into dep map and apply them to dat.
@@ -1627,7 +1607,8 @@ struct TritonAMDGPURescheduleOps
     }
 
     // don't schedule if there is not enough operations in a block
-    if (mlirBlock->getOperations().size() < 3)
+    constexpr int NumMinOpsInBlock = 3;
+    if (mlirBlock->getOperations().size() < NumMinOpsInBlock)
       return failure();
     return success();
   }
