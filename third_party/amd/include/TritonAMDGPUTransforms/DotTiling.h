@@ -10,8 +10,8 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
-#undef LLVM_DEBUG
-#define LLVM_DEBUG(X) X
+// #undef LLVM_DEBUG
+// #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-refine-ops"
