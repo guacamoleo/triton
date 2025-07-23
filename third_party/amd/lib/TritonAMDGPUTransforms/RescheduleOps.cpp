@@ -70,10 +70,9 @@ Operation *createSchedBarrier(OpBuilder &rewriter, Location loc,
   because it overrides many other bits.
 */
 uint32_t schedBarMaskBlockNone =
-    0
-    //|static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::none)
-    //|static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect)
-    | static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::valu) |
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::none) |
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) |
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::valu) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::salu) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_vmem) |
@@ -88,16 +87,20 @@ uint32_t schedBarMaskBlockAll = 0;
 
 uint32_t schedBarMaskBlockDot =
     schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma);
 uint32_t schedBarMaskBlockDsRead =
     schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_read);
 uint32_t schedBarMaskBlockDsWrite =
     schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_write);
 
 uint32_t schedBarMaskBlockDotLds =
     schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_read) ^
@@ -105,6 +108,7 @@ uint32_t schedBarMaskBlockDotLds =
 
 uint32_t schedBarMaskBlockDotLdsGlobal =
     schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_read) ^
