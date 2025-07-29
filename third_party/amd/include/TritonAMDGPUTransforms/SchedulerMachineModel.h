@@ -3,6 +3,7 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "third_party/amd/include/TritonAMDGPUTransforms/DotTiling.h"
 #include "third_party/amd/include/TritonAMDGPUTransforms/MfmaGroup.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -90,8 +91,8 @@ StringRef toString(MachineModelResourcePipe pipe) {
   Basic properties of the hardware instruction which the ttg ops
   best map to.
   For example, mfma_16x16x16 on MI300X
-  - Takes 8 cycles to issue.
-  - Also keeps the mfma pipe busy for an additional 8 cycles
+  - Takes 4 cycles to issue.
+  - Also keeps the mfma pipe busy for an additional 12 cycles
   Therefore 4 back-to-back mfmas will take 4*16=64 cycles since
   they're each taking up 16 cycles of the mfma pipe.
   And 1 mfma, 1 lds op, 1 mfma, 1 other op only takes 4*16=32 cycles
@@ -143,8 +144,8 @@ struct MachineModel {
   virtual MachineModelOpProperties getOpProperties(Operation *op) = 0;
 
   /*
-    Models how many cycles does it take between issuing a memory
-    op and when the data is ready.
+    Models how many cycles does it take between completing issuing
+    a memory op (seqBusy done) and when the data is ready.
     This is currently modeled based on pipe and not on op since
     it is assumed, e.g., that ds_read_b32 has same latency
     as ds_read_b64.
@@ -187,23 +188,32 @@ struct MachineModelGFX942 : MachineModelGFX90A {
     // When specifying that memory ops should be spaced "2 mfmas apart"
     // Since the second is co-scheduled with a mfma, don't include the pipe busy
     // time for the 2nd.
-    int32_t mfmaCycles1 = 1 * 16 - 12;
-    int32_t mfmaCycles2 = 2 * 16 - 12;
-    int32_t mfmaCycles3 = 3 * 16 - 12;
-    int32_t mfmaCycles4 = 4 * 16 - 12;
 
     // Mfma
-    if (isa<triton::DotOp>(op)) {
-      return MachineModelOpProperties(MachineModelResourcePipe::Mfma, 4,
-                                      "mfma_16x16x16", 12);
+    if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
+      auto numRepsVec = getAsmNumRepsForDotOp(dotOp);
+      if (false) {
+        auto dotShape = getWarpShapeForDotOp(dotOp);
+        LDBG("dotWarpShape: " << dotShape[0] << "x" << dotShape[1] << "x"
+                              << dotShape[2]);
+        auto mfmaShape = getAsmShapeForDotOp(dotOp);
+        LDBG("mfmaShape: " << mfmaShape[0] << "x" << mfmaShape[1] << "x"
+                           << mfmaShape[2]);
+        LDBG("numRepsVec: " << numRepsVec[0] << "x" << numRepsVec[1] << "x"
+                            << numRepsVec[2]);
+      }
+      auto numReps = product<uint32_t>(numRepsVec);
+      return MachineModelOpProperties(MachineModelResourcePipe::Mfma,
+                                      4 * numReps, "mfma_16x16x16",
+                                      12 * numReps);
 
       // LDS Ops
     } else if (isa<triton::gpu::LocalLoadOp>(op)) {
       return MachineModelOpProperties(MachineModelResourcePipe::Lds, 4,
-                                      "ds_read_b128", mfmaCycles1);
+                                      "ds_read_b128", 4);
     } else if (isa<triton::gpu::LocalStoreOp>(op)) {
       return MachineModelOpProperties(MachineModelResourcePipe::Lds, 40,
-                                      "ds_write_b128", mfmaCycles2);
+                                      "ds_write_b128", 32);
     } else if (isa<mlir::gpu::BarrierOp>(op)) {
       return MachineModelOpProperties(MachineModelResourcePipe::Lds, 8,
                                       "s_barrier");
@@ -211,7 +221,7 @@ struct MachineModelGFX942 : MachineModelGFX90A {
       // Global Memory Ops
     } else if (isa<triton::LoadOp, triton::amdgpu::BufferLoadOp>(op)) {
       return MachineModelOpProperties(MachineModelResourcePipe::Global, 4,
-                                      "buffer_load", mfmaCycles2);
+                                      "buffer_load", 20);
     }
 
     // Fallback to MI250.
@@ -267,8 +277,8 @@ struct MachineModelGFX942 : MachineModelGFX90A {
 
   (3) TopDown Data Example:
     opDataReadyCycle tracks at which future cycle the data for an op will be
-    ready. E.g. currentCycle=16 scheduleOp(load) will record op->children need
-    to wait until t=16+updateOpDataReady(load).
+    ready. E.g. currentCycle=16, ds_read.seqBusy=4, scheduleOp(load) will record
+  op->children need to wait until t=16+4+updateOpDataReady(load).
 
   (4) BottomUp Data Example:
     Same as TopDown, except that insteady of recording when children will be
@@ -327,9 +337,12 @@ struct MachineState {
   // Queries both pipeReadyCycle and opDataReadyCycle.
   int32_t getCyclesUntilOpReady(Operation *op) {
     MachineModelOpProperties properties = machineModel->getOpProperties(op);
-    int32_t cycles = std::max(getCyclesUntilDataReady(op),
-                              getCyclesUntilPipeReadyForOp(properties));
-    // LDBG("getCyclesUntilOpReady=" << cycles);
+    int32_t data = getCyclesUntilDataReady(op);
+    int32_t pipe = getCyclesUntilPipeReadyForOp(properties);
+    int32_t cycles = std::max(data, pipe);
+    if (false)
+      LDBG("getCyclesUntilOpReady: data=" << data << ", pipe=" << pipe << " - "
+                                          << *op);
     return cycles;
   }
 
@@ -392,19 +405,32 @@ struct MachineState {
   }
 
   /*
-    Updates when target will be ready based on it's
-    dependency with other and the data latency.
-    Call from above and from scheduler.
-    TopDown: target=child, other=parent.
-    BottomUp: target=parent, other=child.
-    Writes to opDataReadyCycle.
+    Updates when target will be ready based on data latency, comprised of
+    - current time when gpu will start issuing memory op
+    - cycles it takes to "complete issuing the memory op", e.g.
+      - ds_read takes 4 cycles to issue
+      - ds_write takes 40 cycles to issue
+    - dependency with other and the data latency, e.g. 80 cycles between
+    ds_write and gpu.barrier. Called from above and from scheduler. TopDown:
+    target=child, other=parent. BottomUp: target=parent, other=child. Writes to
+    opDataReadyCycle.
   */
   void updateOpDataReady(Operation *target, Operation *other) {
     assert(target && other);
     int32_t readyCycle = getCurrentCycle();
     if (topDown) {
+      auto op = target;
+      MachineModelOpProperties properties = machineModel->getOpProperties(op);
+      // When scheduling top-down, assume that other has already been scheduled;
+      // therefore time was already stepped forward by seqBusy.
+      // readyCycle += properties.cyclesSeqBusy;
       readyCycle += calcCyclesUntilDataReady(other);
     } else {
+      auto op = other;
+      MachineModelOpProperties properties = machineModel->getOpProperties(op);
+      // When scheduling bottom-up, the data latency doesn't apply until after
+      // the op's seqBusy, so add that to data ready time.
+      readyCycle += properties.cyclesSeqBusy;
       readyCycle += calcCyclesUntilDataReady(target);
     }
     setDataReadyCycle(target, readyCycle);
@@ -450,10 +476,10 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out,
     out << "=" << machine.pipeReadyCycle[i];
   }
   out << "]";
-  if (false) {
+  if (true) {
     for (auto entry : machine.opDataReadyCycle) {
-      out << "\t t=" << entry.getSecond() << " ready << "
-          << entry.getFirst()->getName() << "\n";
+      out << "\n\t t=" << entry.getSecond() << " ready "
+          << entry.getFirst()->getName();
     }
   }
   return out;

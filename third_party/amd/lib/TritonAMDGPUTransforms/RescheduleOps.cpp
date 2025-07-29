@@ -20,7 +20,7 @@
 // #define LLVM_DEBUG(X) X
 
 #undef DEBUG_TYPE
-#define DEBUG_TYPE "tritonamdgpu-reschedule"
+#define DEBUG_TYPE "tritonamdgpu-reschedule-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
@@ -71,7 +71,8 @@ Operation *createSchedBarrier(OpBuilder &rewriter, Location loc,
 */
 uint32_t schedBarMaskBlockNone =
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::none) |
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) |
+    static_cast<uint32_t>(
+        mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::valu) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::salu) |
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) |
@@ -87,7 +88,8 @@ uint32_t schedBarMaskBlockAll = 0;
 
 uint32_t schedBarMaskBlockDot =
     schedBarMaskBlockNone ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
+    static_cast<uint32_t>(
+        mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma);
 uint32_t schedBarMaskBlockDsRead =
     schedBarMaskBlockNone ^
@@ -97,28 +99,26 @@ uint32_t schedBarMaskBlockDsWrite =
     schedBarMaskBlockNone ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_write);
+uint32_t schedBarMaskBlockGlobal =
+    schedBarMaskBlockNone ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_vmem) ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_read) ^
+    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_write);
 
 uint32_t schedBarMaskBlockDotLds =
     schedBarMaskBlockNone ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
+    static_cast<uint32_t>(
+        mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_read) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_write);
 
-uint32_t schedBarMaskBlockDotLdsGlobal =
+uint32_t schedBarMaskBlockDotGlobal =
     schedBarMaskBlockNone ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
+    static_cast<uint32_t>(
+        mlir::amdgpu::sched_barrier_opt_enum::non_mem_non_sideffect) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_ds) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_read) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::ds_write) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_vmem) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_read) ^
-    static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_write);
-
-uint32_t schedBarMaskBlockGlobal =
-    schedBarMaskBlockNone ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::all_vmem) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_read) ^
     static_cast<uint32_t>(mlir::amdgpu::sched_barrier_opt_enum::vmem_write);
@@ -370,6 +370,10 @@ bool nodeCategoryLocalLoad(SchedDagNode *node) {
 bool nodeCategoryLocalStore(SchedDagNode *node) {
   Operation *op = node->getOp();
   return llvm::isa<triton::gpu::LocalStoreOp>(op);
+}
+
+bool nodeCategoryLds(SchedDagNode *node) {
+  return nodeCategoryLocalLoad(node) || nodeCategoryLocalStore(node);
 }
 
 bool nodeCategoryLoad(SchedDagNode *node) {
@@ -778,11 +782,13 @@ struct SchedDag {
     format["Barrier"] = std::make_pair("gray90", "dotted");
     format["RefinedOrder"] = std::make_pair("gray50", "dotted");
     format["Data"] = std::make_pair("black", "dotted");
-    format["LocalLoadTypeOrder"] = std::make_pair("darkgreen", "solid");
-    format["LocalStoreTypeOrder"] = std::make_pair("darkgreen", "solid");
-    format["GlobalLoadCategoryOrder"] = std::make_pair("darkgreen", "solid");
-    format["MemOrder"] = std::make_pair("blue", "solid");
-    format["MemInterleave"] = std::make_pair("red", "solid");
+    format["LocalLoadOrder"] = std::make_pair("darkgreen", "solid");
+    format["LocalStoreOrder"] = std::make_pair("darkgreen", "solid");
+    format["GlobalLoadOrder"] = std::make_pair("darkgreen", "solid");
+    format["DotLdsOrder"] = std::make_pair("red", "solid");
+    format["DotGlobalOrder"] = std::make_pair("blue", "solid");
+    // format["MemOrder"] = std::make_pair("blue", "solid");
+    // format["MemInterleave"] = std::make_pair("red", "solid");
 
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
@@ -1341,12 +1347,12 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepSet &depSet) {
   }
 }
 
+// Add deps between ops of same category.
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
                         std::function<bool(SchedDagNode *)> category) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
-  for (auto it = nodeList->begin(); it != nodeList->end(); ++it) {
-    SchedDagNode *node = *it;
+  for (auto node : *nodeList) {
     if (category(node)) {
       if (prevNode) {
         SchedDep dep;
@@ -1359,14 +1365,42 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
   }
 }
 
+// Add deps between ops of different categories.
+void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
+                        std::function<bool(SchedDagNode *)> categoryA,
+                        std::function<bool(SchedDagNode *)> categoryB) {
+  SchedDagNode *prevA = nullptr;
+  SchedDagNode *prevB = nullptr;
+
+  for (auto node : *nodeList) {
+    if (categoryA(node)) {
+      if (prevB) {
+        SchedDep dep;
+        dep.parent = prevB;
+        dep.child = node;
+        depSet.insert(dep);
+      }
+      prevA = node;
+    } else if (categoryB(node)) {
+      if (prevA) {
+        SchedDep dep;
+        dep.parent = prevA;
+        dep.child = node;
+        depSet.insert(dep);
+      }
+      prevB = node;
+    }
+  }
+}
+
 struct DotOrderDependencyCalculator : DependencyCalculator {
-  DotOrderDependencyCalculator() : DependencyCalculator("DotTypeOrder") {}
+  DotOrderDependencyCalculator() : DependencyCalculator("DotOrder") {}
   void calcDeps() { calcDepsOpType<triton::DotOp>(&dag->nodeList, depSet); }
 };
 
 struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
   LocalLoadOrderDependencyCalculator()
-      : DependencyCalculator("LocalLoadTypeOrder") {}
+      : DependencyCalculator("LocalLoadOrder") {}
   void calcDeps() {
     calcDepsOpType<triton::gpu::LocalLoadOp>(&dag->nodeList, depSet);
   }
@@ -1374,7 +1408,7 @@ struct LocalLoadOrderDependencyCalculator : DependencyCalculator {
 
 struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
   LocalStoreOrderDependencyCalculator()
-      : DependencyCalculator("LocalStoreTypeOrder") {}
+      : DependencyCalculator("LocalStoreOrder") {}
   void calcDeps() {
     calcDepsOpType<triton::gpu::LocalStoreOp>(&dag->nodeList, depSet);
   }
@@ -1382,16 +1416,24 @@ struct LocalStoreOrderDependencyCalculator : DependencyCalculator {
 
 struct GlobalLoadOrderDependencyCalculator : DependencyCalculator {
   GlobalLoadOrderDependencyCalculator()
-      : DependencyCalculator("GlobalLoadCategoryOrder") {}
+      : DependencyCalculator("GlobalLoadOrder") {}
   void calcDeps() {
     calcDepsOpCategory(&dag->nodeList, depSet, nodeCategoryGlobalLoad);
   }
 };
 
 /******************************************************************************
-  Create order dependencies between ops which were refined from same original
-  op.
+  Add deps between dot ops and lds ops.
 ******************************************************************************/
+struct DotLdsOrderDependencyCalculator : DependencyCalculator {
+  DotLdsOrderDependencyCalculator() : DependencyCalculator("DotLdsOrder") {}
+  void calcDeps() {
+    calcDepsOpCategory(&dag->nodeList, depSet, nodeCategoryDot,
+                       nodeCategoryLds);
+  }
+};
+
+#if 0
 struct DotLdsOrderDependencyCalculator : DependencyCalculator {
   DotLdsOrderDependencyCalculator() : DependencyCalculator("DotLdsOrder") {}
 
@@ -1400,8 +1442,7 @@ struct DotLdsOrderDependencyCalculator : DependencyCalculator {
     SchedDagNode *prevLds = nullptr;
 
     for (auto node : dag->nodeList) {
-      if (isa<triton::gpu::LocalLoadOp, triton::gpu::LocalStoreOp>(
-              node->getOp())) {
+      if (nodeCategoryLds(node)) {
         if (prevDot) {
           SchedDep dep;
           dep.parent = prevDot;
@@ -1419,6 +1460,19 @@ struct DotLdsOrderDependencyCalculator : DependencyCalculator {
         prevDot = node;
       }
     }
+  }
+};
+#endif
+
+/******************************************************************************
+  Add deps between dot ops and global ops.
+******************************************************************************/
+struct DotGlobalOrderDependencyCalculator : DependencyCalculator {
+  DotGlobalOrderDependencyCalculator()
+      : DependencyCalculator("DotGlobalOrder") {}
+  void calcDeps() {
+    calcDepsOpCategory(&dag->nodeList, depSet, nodeCategoryDot,
+                       nodeCategoryGlobalLoad);
   }
 };
 
@@ -1906,12 +1960,11 @@ struct ApplySchedBarriers {
     if (!parentCategory(parentNode)) {
       return false;
     }
-    // Find next dot/lds.
+    // Find next op matching childCategory.
     for (SchedDagNode *const *it = parentIter + 1; it != dag.nodeList.end();
          it++) {
       SchedDagNode *childNode = *it;
       Operation *childOp = childNode->getOp();
-      // Now check for dot/lds
       if (childCategory(childNode)) {
         // Check if dep exists.
         SchedDep dep(parentNode, childNode);
@@ -1923,15 +1976,7 @@ struct ApplySchedBarriers {
           std::shared_ptr<SchedDagNode> schedBarNode =
               std::make_shared<SchedDagNode>(schedBarOp);
           dag.nodesHeap.push_back(schedBarNode);
-          // Insert *after* node.
-          LDBG("cap=" << dag.nodeList.capacity()
-                      << ", size=" << dag.nodeList.size()
-                      << ", max=" << dag.nodeList.max_size());
-          LDBG("Inserting parentIter: " << **parentIter);
-          LDBG("Inserting parentIt+1: " << **(parentIter + 1));
           parentIter = dag.nodeList.insert(parentIter + 1, schedBarNode.get());
-          LDBG("Inserting parentIter: " << **(parentIter) << " (done)");
-          // Skip analyzing the sched.barrier.
           ++parentIter;
           return true;
         } else {
@@ -1940,7 +1985,7 @@ struct ApplySchedBarriers {
         }
       }
     }
-    return true;
+    return false;
   }
 
   /*
@@ -1961,46 +2006,50 @@ struct ApplySchedBarriers {
 
     for (auto it = dag.nodeList.begin(); it != dag.nodeList.end(); ++it) {
       SchedDagNode *node = *it;
-      bool added;
-      // TODO(dtanner) track what category the barrier types adds to add all
-      // needed types but not superfluous.
 
       // Dot / Lds
-      added = maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
-                                   "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!added)
-        added = maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryDot,
-                                     "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!added)
-        added =
+      bool addedDotLds =
+          maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalLoad,
+                               "DotLdsOrder", schedBarMaskBlockDotLds);
+      if (!addedDotLds)
+        addedDotLds =
+            maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryDot,
+                                 "DotLdsOrder", schedBarMaskBlockDotLds);
+      if (!addedDotLds)
+        addedDotLds =
             maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryLocalStore,
                                  "DotLdsOrder", schedBarMaskBlockDotLds);
-      if (!added)
-        added =
+      if (!addedDotLds)
+        addedDotLds =
             maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryDot,
                                  "DotLdsOrder", schedBarMaskBlockDotLds);
 
+      // Dot / GlobalLoad
+      bool addedDotGlobal =
+          maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryGlobal,
+                               "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+      if (!addedDotGlobal)
+        addedDotGlobal =
+            maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryDot,
+                                 "DotGlobalOrder", schedBarMaskBlockDotGlobal);
+
       // Dot / Dot
-      if (!added)
-        added = maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryDot,
-                                     "DotTypeOrder", schedBarMaskBlockDot);
+      if (!addedDotLds && !addedDotGlobal)
+        maybeAddSchedBarrier(it, nodeCategoryDot, nodeCategoryDot, "DotOrder",
+                             schedBarMaskBlockDot);
       // LocalLoad / LocalLoad
-      if (!added)
-        added = maybeAddSchedBarrier(
-            it, nodeCategoryLocalLoad, nodeCategoryLocalLoad,
-            "LocalLoadTypeOrder", schedBarMaskBlockDsRead);
+      if (!addedDotLds)
+        maybeAddSchedBarrier(it, nodeCategoryLocalLoad, nodeCategoryLocalLoad,
+                             "LocalLoadOrder", schedBarMaskBlockDsRead);
       // LocalStore / LocalStore
-      if (!added)
-        added = maybeAddSchedBarrier(
-            it, nodeCategoryLocalStore, nodeCategoryLocalStore,
-            "LocalStoreTypeOrder", schedBarMaskBlockDsWrite);
+      if (!addedDotLds)
+        maybeAddSchedBarrier(it, nodeCategoryLocalStore, nodeCategoryLocalStore,
+                             "LocalStoreOrder", schedBarMaskBlockDsWrite);
 
       // GlobalLoad / GlobalLoad
-      if (!added)
-        added = maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryGlobal,
-                                     "GlobalLoadCategoryOrder",
-                                     schedBarMaskBlockGlobal);
-      // TODO(dtanner) anchor GlobalLoads with Dots?
+      if (!addedDotGlobal)
+        maybeAddSchedBarrier(it, nodeCategoryGlobal, nodeCategoryGlobal,
+                             "GlobalLoadOrder", schedBarMaskBlockGlobal);
     }
     LDBG("insertSchedBarriers() - DONE");
   }
@@ -2037,12 +2086,14 @@ struct SchedManager {
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
          << ", Heuristic=" << heuristic->getName());
+    const bool printDetails = false; // rescheduleId >= 1;
     // Reset deps right before rescheduling b/c analysis passes may have altered
     // them.
     dag.resetDeps();
-    LDBG("SchedDag before reschedule(" << rescheduleId << ")");
-    LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
-
+    if (printDetails) {
+      LDBG("SchedDag before reschedule(" << rescheduleId << ")");
+      LLVM_DEBUG(dag.dumpDotFormat(llvm::dbgs()));
+    }
     // Node readiness is based on direction.
     dag.initReadyNodes<Direction>();
     heuristic->begin();
@@ -2050,9 +2101,8 @@ struct SchedManager {
     // Schedule the dag; this process removes deps from nodes.
     // Store nodes in newly scheduled order.
     SchedDagNodeList rescheduledNodes;
-    const bool printDetails = rescheduleId > 0;
     for (int iter = 0; !dag.finished(); ++iter) {
-      scheduleNextOp<Direction>(heuristic, rescheduledNodes);
+      scheduleNextOp<Direction>(heuristic, rescheduledNodes, printDetails);
     }
     heuristic->end();
 
@@ -2083,8 +2133,8 @@ struct SchedManager {
   // Single pass of rescheduling the dag.
   template <SchedDirection Direction>
   void scheduleNextOp(SchedHeuristic<Direction> *heuristic,
-                      SchedDagNodeList &rescheduledNodes) {
-    const bool printDetails = rescheduleId > 0;
+                      SchedDagNodeList &rescheduledNodes,
+                      bool printDetails = false) {
     // Print ReadyNodes and HeuristicState
     const auto &readyNodes = dag.getReadyNodes();
     if (printDetails) {
@@ -2099,11 +2149,10 @@ struct SchedManager {
 
     // Select
     SchedDagNode *selectedNode = selectFromReadyNodes(readyNodes, heuristic);
-    if (printDetails) {
-      LDBG("Selected: " << *selectedNode);
-    }
     heuristic->selectedOp(selectedNode);
-
+    if (printDetails) {
+      LDBG("Selected: " << *selectedNode << "\n");
+    }
     // Place selected node in list, remove it from dag which updates
     // readyList.
     rescheduledNodes.push_back(selectedNode);
@@ -2287,7 +2336,13 @@ struct TritonAMDGPURescheduleOps
       This is already the beginning of working on this.
       schedManager.addDeps(std::make_unique<MemOrderDependencyCalculator>());
     */
-
+    schedManager.addDeps(
+        std::make_unique<DotGlobalOrderDependencyCalculator>());
+    if (dumpGraphs) {
+      LLVM_DEBUG(LDBG("Dag: data, dot:dot, ls:ls, bar:*, ll:ll, gl:gl, ll:dot, "
+                      "ls:dot, gl:dot");
+                 schedManager.dag.dumpDotFormat(llvm::dbgs()););
+    }
     schedManager.insertSchedBarriers();
 
     // Copy scheduled order to basic block.
