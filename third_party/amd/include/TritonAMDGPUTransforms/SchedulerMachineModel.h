@@ -84,6 +84,7 @@ StringRef toString(MachineModelResourcePipe pipe) {
   case Other:
     return "O";
   }
+  return "?";
 };
 
 /*
