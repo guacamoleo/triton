@@ -10,9 +10,6 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
-// #undef LLVM_DEBUG
-// #define LLVM_DEBUG(X) X
-
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-dot-tiling"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -34,18 +31,14 @@ SmallVector<uint32_t> getWarpShapeForDotOp(DotOp dotOp) {
   auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
   MLIRContext *ctx = dotOp->getContext();
   Value a = dotOp.getA();
-  // Value b = dotOp.getB();
   Value d = dotOp.getD();
   auto aTensorTy = cast<RankedTensorType>(a.getType());
   auto encodeA = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
-  // auto bTensorTy = cast<RankedTensorType>(b.getType());
   auto dTensorTy = cast<RankedTensorType>(d.getType());
   auto elemTyA = aTensorTy.getElementType();
-  // auto elemTyB = bTensorTy.getElementType();
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   auto shapeA = aTensorTy.getShape();
-  // auto shapeB = bTensorTy.getShape();
   auto shapeD = dTensorTy.getShape();
   SmallVector<uint32_t> ctaTile = {static_cast<uint32_t>(shapeD[0]),
                                    static_cast<uint32_t>(shapeD[1]),
@@ -57,7 +50,6 @@ SmallVector<uint32_t> getWarpShapeForDotOp(DotOp dotOp) {
 
 // Get Shape of assembly instructions, e.g. mfma/wmma 16x16x32.
 SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
-  // Get mfma op type.
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
       cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
   MLIRContext *ctx = dotOp->getContext();
@@ -70,7 +62,6 @@ SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   const auto kDimOperandSize = aTensorTy.getShape().back();
-  // auto kDim = mfmaLayout.getKDim();
   auto mfmaVersion = mfmaLayout.getVersion();
   bool allowXF32 =
       dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;

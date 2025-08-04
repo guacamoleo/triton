@@ -16,9 +16,6 @@
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
 
-// #undef LLVM_DEBUG
-// #define LLVM_DEBUG(X) X
-
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-reschedule-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -2346,7 +2343,8 @@ struct TritonAMDGPURescheduleOps
                       "ls:dot, gl:dot");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
-    schedManager.insertSchedBarriers();
+    if (true)
+      schedManager.insertSchedBarriers();
 
     // Copy scheduled order to basic block.
     SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
