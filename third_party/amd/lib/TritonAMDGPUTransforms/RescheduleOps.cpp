@@ -146,7 +146,7 @@ enum class SchedDirection { TopDown, BottomUp };
 enum class SchedDagNodePriorityType : uint32_t {
   DotCriticalPath = 0,
   LocalStoreCriticalPath = 1,
-  Size // Keep as last to know size().
+  Size
 };
 using SchedDagNodePriorityDataType = int32_t;
 using SchedDagNodePriority =
@@ -870,15 +870,6 @@ struct DataDependencyCalculator : DependencyCalculator {
 
 /******************************************************************************
   Creates dependencies based on various barriers.
-  TODO(dtanner) may need to add support for below ops
-  triton::gpu::AsyncWaitOp
-  triton::nvidia_gpu::TMAStoreWaitOp
-  triton::nvidia_gpu::ArriveBarrierOp
-  MemoryEffects::Write
-  MemoryEffects::Read
-  triton::CallOp
-  triton::gpu::LocalAllocOp
-  triton::gpu::LocalDeallocOp
 ******************************************************************************/
 struct BarrierDependencyCalculator : DependencyCalculator {
   BarrierDependencyCalculator() : DependencyCalculator("Barrier") {}
@@ -1344,11 +1335,11 @@ void calcDepsOpType(SchedDagNodeList *nodeList, DepSet &depSet) {
 
 // Add deps between ops of same category.
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
-                        std::function<bool(SchedDagNode *)> category) {
+                        std::function<bool(SchedDagNode *)> isCategory) {
   SchedDagNode *prevNode = nullptr;
   int32_t prevId = -1;
   for (auto node : *nodeList) {
-    if (category(node)) {
+    if (isCategory(node)) {
       if (prevNode) {
         SchedDep dep;
         dep.parent = prevNode;
@@ -1601,10 +1592,10 @@ struct PriorityCalculator {
 
   virtual void calcPriorities() = 0;
 
-  void addPrioritiesToDag(SchedDag *d) {
+  void addPrioritiesToDag(SchedDag *inputDag) {
     LDBG("PriorityCalculator<" << toString(priorityType)
                                << ">::addPrioritiesToDag()");
-    dag = d;
+    dag = inputDag;
     calcPriorities();
   }
   virtual ~PriorityCalculator() = default;
@@ -2300,8 +2291,7 @@ struct TritonAMDGPURescheduleOps
                       "ls:dot, gl:dot");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
-    if (true)
-      schedManager.insertSchedBarriers();
+    schedManager.insertSchedBarriers();
 
     // Copy scheduled order to basic block.
     SmallVector<Operation *> rescheduledOps = schedManager.getOpList();
