@@ -105,10 +105,12 @@ StringRef toString(MachineModelResourcePipe pipe) {
 */
 struct MachineModelOpProperties {
 
-  MachineModelOpProperties(MachineModelResourcePipe pipe, int32_t sequencerBusy,
-                           StringRef inputName, int32_t pipeBusyAfterSequencer = 0)
-      : resourcePipe(pipe), cyclesSequencerBusy(sequencerBusy),
-        cyclesPipeBusyAfterSequencer(pipeBusyAfterSequencer), name(inputName) {}
+  MachineModelOpProperties(MachineModelResourcePipe resourcePipe,
+                           int32_t cyclesSequencerBusy, StringRef name,
+                           int32_t cyclesPipeBusyAfterSequencer = 0)
+      : resourcePipe(resourcePipe), cyclesSequencerBusy(cyclesSequencerBusy),
+        cyclesPipeBusyAfterSequencer(cyclesPipeBusyAfterSequencer), name(name) {
+  }
 
   // To which resource pipe does this op map.
   MachineModelResourcePipe resourcePipe;
@@ -336,9 +338,11 @@ struct MachineState {
   // Queries pipeReadyCycle.
   int32_t getCyclesUntilPipeReadyForOp(MachineModelOpProperties properties) {
     if (topDown)
-      return std::max(0, (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle()));
-    return std::max(0, (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle()) +
-          properties.cyclesPipeBusyAfterSequencer);
+      return std::max(
+          0, (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle()));
+    return std::max(
+        0, (pipeReadyCycle[properties.resourcePipe] - getCurrentCycle()) +
+               properties.cyclesPipeBusyAfterSequencer);
   }
 
   // Calculates when data will be ready; examples provided above.
@@ -397,15 +401,15 @@ struct MachineState {
     assert(target && other);
     int32_t readyCycle = getCurrentCycle();
     if (topDown) {
-      auto op = target;
-      MachineModelOpProperties properties = machineModel->getOpProperties(op);
+      MachineModelOpProperties properties =
+          machineModel->getOpProperties(target);
       // When scheduling top-down, assume that other has already been scheduled;
       // therefore time was already stepped forward by seqBusy.
       // readyCycle += properties.cyclesSequencerBusy;
       readyCycle += calcCyclesUntilDataReady(other);
     } else {
-      auto op = other;
-      MachineModelOpProperties properties = machineModel->getOpProperties(op);
+      MachineModelOpProperties properties =
+          machineModel->getOpProperties(other);
       // When scheduling bottom-up, the data latency doesn't apply until after
       // the op's seqBusy, so add that to data ready time.
       readyCycle += properties.cyclesSequencerBusy;
@@ -439,7 +443,8 @@ struct MachineState {
   MachineModel *machineModel;
   // Tracks pipe readiness differently for TopDown vs BottomUp.
   // BottomUp: tracks the cycle during which pipe was last used.
-  // TopDown: tracks the cycle last used + prev op's cyclesPipeBusyAfterSequencer.
+  // TopDown: tracks the cycle last used + prev op's
+  // cyclesPipeBusyAfterSequencer.
   SmallVector<int32_t, numResourcePipes> pipeReadyCycle;
   DenseMap<Operation *, int32_t> opDataReadyCycle;
   bool topDown;

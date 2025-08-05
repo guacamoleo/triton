@@ -72,17 +72,15 @@ SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
                                /*withScale=*/false, allowXF32);
   if (failed(maybeMfmaInsn))
     llvm::report_fatal_error("No match found in MFMA database\n");
-  return SmallVector<uint32_t, 3>(
-      {maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, maybeMfmaInsn->kDim});
+  return {maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, maybeMfmaInsn->kDim};
 }
 
 // Get number of assembly instructions [per wave] for dot op.
 SmallVector<uint32_t> getAsmNumRepsForDotOp(DotOp dotOp) {
   auto dotShape = getWarpShapeForDotOp(dotOp);
   auto mfmaShape = getAsmShapeForDotOp(dotOp);
-  return SmallVector<uint32_t>({dotShape[0] / mfmaShape[0],
-                                dotShape[1] / mfmaShape[1],
-                                dotShape[2] / mfmaShape[2]});
+  return {dotShape[0] / mfmaShape[0], dotShape[1] / mfmaShape[1],
+          dotShape[2] / mfmaShape[2]};
 }
 
 unsigned getCyclesPerMfma(DotOp dotOp) {

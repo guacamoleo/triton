@@ -438,7 +438,8 @@ struct SchedDep {
   SchedDagNode *child;
 
   SchedDep() = default;
-  SchedDep(SchedDagNode *p, SchedDagNode *c) : parent(p), child(c) {}
+  SchedDep(SchedDagNode *parent, SchedDagNode *child)
+      : parent(parent), child(child) {}
 
   llvm::raw_ostream &dump(llvm::raw_ostream &out) const {
     out << "p=" << parent->id << " <- c=" << child->id;
@@ -536,8 +537,7 @@ struct SchedDag {
 
   // Deep copy constructor; used for memory analysis.
   SchedDag(const SchedDag &dag)
-      : nodeList(dag.nodeList), deps(dag.deps),
-        nodeMap(dag.nodeMap) {
+      : nodeList(dag.nodeList), deps(dag.deps), nodeMap(dag.nodeMap) {
     // TODO(dtanner) - this needs to create new nodes on the heap
     // for nodeList, then reconstruct deps and nodeMap with
     // the new pointers.
@@ -823,7 +823,7 @@ struct SchedDag {
   as well as all previously applied deps.
 ******************************************************************************/
 struct DependencyCalculator {
-  DependencyCalculator(StringRef name) : depTypeName(name) {}
+  DependencyCalculator(StringRef depTypeName) : depTypeName(depTypeName) {}
 
   virtual void calcDeps() = 0;
 
@@ -870,11 +870,10 @@ struct DataDependencyCalculator : DependencyCalculator {
 
 /******************************************************************************
   Creates dependencies based on various barriers.
-  TODO(dtanner) need to add support for below?
+  TODO(dtanner) may need to add support for below ops
   triton::gpu::AsyncWaitOp
   triton::nvidia_gpu::TMAStoreWaitOp
   triton::nvidia_gpu::ArriveBarrierOp
-  RegionBranchOpInterface ?
   MemoryEffects::Write
   MemoryEffects::Read
   triton::CallOp
@@ -1363,13 +1362,13 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
 
 // Add deps between ops of different categories.
 void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
-                        std::function<bool(SchedDagNode *)> categoryA,
-                        std::function<bool(SchedDagNode *)> categoryB) {
+                        std::function<bool(SchedDagNode *)> isCategoryA,
+                        std::function<bool(SchedDagNode *)> isCategoryB) {
   SchedDagNode *prevA = nullptr;
   SchedDagNode *prevB = nullptr;
 
   for (auto node : *nodeList) {
-    if (categoryA(node)) {
+    if (isCategoryA(node)) {
       if (prevB) {
         SchedDep dep;
         dep.parent = prevB;
@@ -1377,7 +1376,7 @@ void calcDepsOpCategory(SchedDagNodeList *nodeList, DepSet &depSet,
         depSet.insert(dep);
       }
       prevA = node;
-    } else if (categoryB(node)) {
+    } else if (isCategoryB(node)) {
       if (prevA) {
         SchedDep dep;
         dep.parent = prevA;
@@ -1517,79 +1516,72 @@ struct MemOrderDependencyCalculator : DependencyCalculator {
   then move on to the next comparison.
 ******************************************************************************/
 
-// Prefer based on node priority.
-bool preferPriority(SchedDagNode *a, SchedDagNode *b,
-                    SchedDagNodePriorityType priorityType, bool prefer = true) {
-  if (a->hasPriority(priorityType)) {
-    if (b->hasPriority(priorityType)) {
-      return (a->getPriority(priorityType) > b->getPriority(priorityType)) ==
-             prefer;
-    }
-    return prefer;
-  }
-  if (b->hasPriority(priorityType)) {
-    return !prefer;
-  }
-  return false;
-}
-SchedDagNode *findPreferredPriority(SchedDagNode *a, SchedDagNode *b,
+// Prefer based on node priority, i.e. critical path.
+SchedDagNode *findPreferredPriority(SchedDagNode *lhs, SchedDagNode *rhs,
                                     SchedDagNodePriorityType priorityType,
                                     bool prefer = true) {
-  if (preferPriority(a, b, priorityType, prefer)) {
-    return a;
-  } else if (preferPriority(b, a, priorityType, prefer)) {
-    return b;
-  }
+  auto preferPriority = [&](SchedDagNode *a, SchedDagNode *b) -> bool {
+    if (a->hasPriority(priorityType)) {
+      if (b->hasPriority(priorityType)) {
+        return (a->getPriority(priorityType) > b->getPriority(priorityType)) ==
+               prefer;
+      }
+      return prefer;
+    }
+    if (b->hasPriority(priorityType)) {
+      return !prefer;
+    }
+    return false;
+  };
+
+  if (preferPriority(lhs, rhs))
+    return lhs;
+  if (preferPriority(rhs, lhs))
+    return rhs;
   return nullptr;
 }
 
-// Prefer based on op type.
+// Prefer based on op type; meaning one is optype AND other isn't.
 template <typename OpType>
-bool preferOpType(SchedDagNode *a, SchedDagNode *b, bool prefer = true) {
-  return (llvm::isa<OpType>(a->getOp()) and !llvm::isa<OpType>(b->getOp())) ==
-         prefer;
-}
-template <typename OpType>
-SchedDagNode *findPreferredOpType(SchedDagNode *a, SchedDagNode *b,
+SchedDagNode *findPreferredOpType(SchedDagNode *lhs, SchedDagNode *rhs,
                                   bool prefer = true) {
-  if (preferOpType<OpType>(a, b, prefer)) {
-    return a;
-  } else if (preferOpType<OpType>(b, a, prefer)) {
-    return b;
-  }
+  auto preferOpType = [&](SchedDagNode *a, SchedDagNode *b) -> bool {
+    return (llvm::isa<OpType>(a->getOp()) and !llvm::isa<OpType>(b->getOp())) ==
+           prefer;
+  };
+  if (preferOpType(lhs, rhs))
+    return lhs;
+  if (preferOpType(rhs, lhs))
+    return rhs;
   return nullptr;
 }
 
-// Prefer based on op category (functions).
-bool preferOpCategory(SchedDagNode *a, SchedDagNode *b,
-                      bool (*category)(SchedDagNode *), bool prefer = true) {
-  return (category(a) and !category(b)) == prefer;
-}
-SchedDagNode *findPreferredOpCategory(SchedDagNode *a, SchedDagNode *b,
-                                      bool (*category)(SchedDagNode *),
+// Prefer based on op category.
+SchedDagNode *findPreferredOpCategory(SchedDagNode *lhs, SchedDagNode *rhs,
+                                      bool (*isCategory)(SchedDagNode *),
                                       bool prefer = true) {
-  if (preferOpCategory(a, b, category, prefer)) {
-    return a;
-  } else if (preferOpCategory(b, a, category, prefer)) {
-    return b;
-  }
+  auto preferOpCategory = [&](SchedDagNode *a, SchedDagNode *b) -> bool {
+    return (isCategory(a) and !isCategory(b)) == prefer;
+  };
+  if (preferOpCategory(lhs, rhs))
+    return lhs;
+  if (preferOpCategory(rhs, lhs))
+    return rhs;
   return nullptr;
 }
 
 // Prefer based on machine state.
-bool preferMachineState(SchedDagNode *a, SchedDagNode *b, MachineState *machine,
-                        bool prefer = true) {
-  return (machine->getCyclesUntilOpReady(a->getOp()) <
-          machine->getCyclesUntilOpReady(b->getOp())) == prefer;
-}
-SchedDagNode *findPreferredMachineState(SchedDagNode *a, SchedDagNode *b,
+SchedDagNode *findPreferredMachineState(SchedDagNode *lhs, SchedDagNode *rhs,
                                         MachineState *machine,
                                         bool prefer = true) {
-  if (preferMachineState(a, b, machine, prefer)) {
-    return a;
-  } else if (preferMachineState(b, a, machine, prefer)) {
-    return b;
-  }
+  auto preferMachineState = [&](SchedDagNode *a, SchedDagNode *b) -> bool {
+    return (machine->getCyclesUntilOpReady(a->getOp()) <
+            machine->getCyclesUntilOpReady(b->getOp())) == prefer;
+  };
+  if (preferMachineState(lhs, rhs))
+    return lhs;
+  if (preferMachineState(rhs, lhs))
+    return rhs;
   return nullptr;
 }
 
@@ -1604,7 +1596,8 @@ SchedDagNode *getOriginalOrder(SchedDagNode *a, SchedDagNode *b) {
   and set scheduling priorities to nodes.
 ******************************************************************************/
 struct PriorityCalculator {
-  PriorityCalculator(SchedDagNodePriorityType type) : priorityType(type) {}
+  PriorityCalculator(SchedDagNodePriorityType priorityType)
+      : priorityType(priorityType) {}
 
   virtual void calcPriorities() = 0;
 
@@ -1745,7 +1738,7 @@ struct LocalStoreCriticalPathPriorityCalculator : public PriorityCalculator {
   E.g. TopDown, schedule LoadOps early and LocalStoreOps late.
 */
 template <SchedDirection Direction> struct SchedHeuristic {
-  SchedHeuristic(StringRef n) : name(n) {}
+  SchedHeuristic(StringRef name) : name(name) {}
   // Scheduler prints the name of heuristic.
   StringRef getName() const { return name; }
   // Scheduler calls before beginning a scheduling pass.
@@ -1908,7 +1901,8 @@ struct SchedHeuristicOriginalOrder
   only add sched.barriers with knowledge of the AddDeps passes.
 */
 struct ApplySchedBarriers {
-  ApplySchedBarriers(SchedDag &d, OpBuilder &b) : dag(d), builder(b) {}
+  ApplySchedBarriers(SchedDag &dag, OpBuilder &builder)
+      : dag(dag), builder(builder) {}
 
   /*
     Verify parentIter is a parentCategory, then find next node matching
@@ -1938,8 +1932,7 @@ struct ApplySchedBarriers {
           builder.setInsertionPointAfter(op);
           Operation *schedBarOp =
               createSchedBarrier(builder, loc, schedBarMask);
-          SchedDagNode *schedBarNode =
-              new SchedDagNode(schedBarOp);
+          SchedDagNode *schedBarNode = new SchedDagNode(schedBarOp);
           parentIter = dag.nodeList.insert(parentIter + 1, schedBarNode);
           ++parentIter;
           return true;
@@ -2029,8 +2022,8 @@ struct ApplySchedBarriers {
   - Runs scheduling heuristic on the dag.
 ******************************************************************************/
 struct SchedManager {
-  SchedManager(Block *block, OpBuilder &b)
-      : dag(block), rescheduleId(0), builder(b) {}
+  SchedManager(Block *block, OpBuilder &builder)
+      : dag(block), rescheduleId(0), builder(builder) {}
 
   // Calculate new deps based on op order and previously determined deps.
   // Insert new deps into dep map and apply them to dat.
