@@ -345,14 +345,6 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &out, SchedDagNodeList &nodes) {
   }
   return out;
 }
-llvm::raw_ostream &
-operator<<(llvm::raw_ostream &out,
-           llvm::SmallVector<std::shared_ptr<SchedDagNode>> &nodes) {
-  for (auto node : nodes) {
-    out << *(node.get()) << "\n";
-  }
-  return out;
-}
 
 /******************************************************************************
   Categories of ops to facilitate scheduling.
@@ -542,18 +534,21 @@ struct SchedDag {
     }
   }
 
-  // Shallow copy constructor.
+  // Deep copy constructor; used for memory analysis.
   SchedDag(const SchedDag &dag)
-      : nodesHeap(dag.nodesHeap), nodeList(dag.nodeList), deps(dag.deps),
+      : nodeList(dag.nodeList), deps(dag.deps),
         nodeMap(dag.nodeMap) {
-    LDBG("SchedDag::CopyConstructor(shallow)");
+    // TODO(dtanner) - this needs to create new nodes on the heap
+    // for nodeList, then reconstruct deps and nodeMap with
+    // the new pointers.
+    LDBG("SchedDag(deep copy constructor)");
+    assert(false);
   }
 
   void addOp(Operation *op) {
-    std::shared_ptr<SchedDagNode> node = std::make_shared<SchedDagNode>(op);
-    nodeMap.insert({op, node.get()});
-    nodeList.push_back(node.get());
-    nodesHeap.push_back(std::move(node));
+    SchedDagNode *node = new SchedDagNode(op);
+    nodeMap.insert({op, node});
+    nodeList.push_back(node);
   }
 
   void addDeps(StringRef depTypeName, const DepSet &depSet) {
@@ -787,8 +782,6 @@ struct SchedDag {
     format["GlobalLoadOrder"] = std::make_pair("darkgreen", "solid");
     format["DotLdsOrder"] = std::make_pair("red", "solid");
     format["DotGlobalOrder"] = std::make_pair("blue", "solid");
-    // format["MemOrder"] = std::make_pair("blue", "solid");
-    // format["MemInterleave"] = std::make_pair("red", "solid");
 
     for (auto &depType : deps) {
       StringRef depTypeName = depType.getFirst();
@@ -813,9 +806,12 @@ struct SchedDag {
     return out;
   }
 
-  // SchedDagNodes as shared_ptrs for dealloc.
-  llvm::SmallVector<std::shared_ptr<SchedDagNode>> nodesHeap;
-  // SchedDagNodes as simple ptrs for everything else.
+  ~SchedDag() {
+    for (SchedDagNode *node : nodeList) {
+      delete node;
+    }
+  }
+
   SchedDagNodeList nodeList;
   DepMap deps;
   OpNodeMap nodeMap;
@@ -1433,37 +1429,6 @@ struct DotLdsOrderDependencyCalculator : DependencyCalculator {
   }
 };
 
-#if 0
-struct DotLdsOrderDependencyCalculator : DependencyCalculator {
-  DotLdsOrderDependencyCalculator() : DependencyCalculator("DotLdsOrder") {}
-
-  void calcDeps() {
-    SchedDagNode *prevDot = nullptr;
-    SchedDagNode *prevLds = nullptr;
-
-    for (auto node : dag->nodeList) {
-      if (nodeCategoryLds(node)) {
-        if (prevDot) {
-          SchedDep dep;
-          dep.parent = prevDot;
-          dep.child = node;
-          depSet.insert(dep);
-        }
-        prevLds = node;
-      } else if (isa<triton::DotOp>(node->getOp())) {
-        if (prevLds) {
-          SchedDep dep;
-          dep.parent = prevLds;
-          dep.child = node;
-          depSet.insert(dep);
-        }
-        prevDot = node;
-      }
-    }
-  }
-};
-#endif
-
 /******************************************************************************
   Add deps between dot ops and global ops.
 ******************************************************************************/
@@ -1973,10 +1938,9 @@ struct ApplySchedBarriers {
           builder.setInsertionPointAfter(op);
           Operation *schedBarOp =
               createSchedBarrier(builder, loc, schedBarMask);
-          std::shared_ptr<SchedDagNode> schedBarNode =
-              std::make_shared<SchedDagNode>(schedBarOp);
-          dag.nodesHeap.push_back(schedBarNode);
-          parentIter = dag.nodeList.insert(parentIter + 1, schedBarNode.get());
+          SchedDagNode *schedBarNode =
+              new SchedDagNode(schedBarOp);
+          parentIter = dag.nodeList.insert(parentIter + 1, schedBarNode);
           ++parentIter;
           return true;
         } else {
