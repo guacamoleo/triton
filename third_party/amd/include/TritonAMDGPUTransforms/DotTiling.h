@@ -11,7 +11,7 @@
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 #undef DEBUG_TYPE
-#define DEBUG_TYPE "tritonamdgpu-refine-ops"
+#define DEBUG_TYPE "tritonamdgpu-dot-tiling"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
@@ -23,6 +23,66 @@ namespace {
 /*
  TODO - this needs to be MUCH more official.
 */
+
+// Return warp shape of dot op, e.g. 16x16x128 if kPack>1
+SmallVector<uint32_t> getWarpShapeForDotOp(DotOp dotOp) {
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
+      cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
+  auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  MLIRContext *ctx = dotOp->getContext();
+  Value a = dotOp.getA();
+  Value d = dotOp.getD();
+  auto aTensorTy = cast<RankedTensorType>(a.getType());
+  auto encodeA = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+  auto dTensorTy = cast<RankedTensorType>(d.getType());
+  auto elemTyA = aTensorTy.getElementType();
+  auto mDim = mfmaLayout.getMDim();
+  auto nDim = mfmaLayout.getNDim();
+  auto shapeA = aTensorTy.getShape();
+  auto shapeD = dTensorTy.getShape();
+  SmallVector<uint32_t> ctaTile = {static_cast<uint32_t>(shapeD[0]),
+                                   static_cast<uint32_t>(shapeD[1]),
+                                   static_cast<uint32_t>(shapeA[1])};
+  SmallVector<uint32_t> warpTile = {ctaTile[0] / warpsPerCTA[0],
+                                    ctaTile[1] / warpsPerCTA[1], ctaTile[2]};
+  return warpTile;
+}
+
+// Get Shape of assembly instructions, e.g. mfma/wmma 16x16x32.
+SmallVector<uint32_t> getAsmShapeForDotOp(DotOp dotOp) {
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
+      cast<RankedTensorType>(dotOp.getResult().getType()).getEncoding());
+  MLIRContext *ctx = dotOp->getContext();
+  Value a = dotOp.getA();
+  Value b = dotOp.getB();
+  auto aTensorTy = cast<RankedTensorType>(a.getType());
+  auto bTensorTy = cast<RankedTensorType>(b.getType());
+  auto elemTyA = aTensorTy.getElementType();
+  auto elemTyB = bTensorTy.getElementType();
+  auto mDim = mfmaLayout.getMDim();
+  auto nDim = mfmaLayout.getNDim();
+  const auto kDimOperandSize = aTensorTy.getShape().back();
+  auto mfmaVersion = mfmaLayout.getVersion();
+  bool allowXF32 =
+      dotOp.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
+
+  FailureOr<MfmaIntrinsic> maybeMfmaInsn =
+      MfmaIntrinsic::selectFor(dotOp->getLoc(), mfmaVersion, mDim, nDim,
+                               kDimOperandSize, elemTyA, elemTyB,
+                               /*withScale=*/false, allowXF32);
+  if (failed(maybeMfmaInsn))
+    llvm::report_fatal_error("No match found in MFMA database\n");
+  return {maybeMfmaInsn->mDim, maybeMfmaInsn->nDim, maybeMfmaInsn->kDim};
+}
+
+// Get number of assembly instructions [per wave] for dot op.
+SmallVector<uint32_t> getAsmNumRepsForDotOp(DotOp dotOp) {
+  auto dotShape = getWarpShapeForDotOp(dotOp);
+  auto mfmaShape = getAsmShapeForDotOp(dotOp);
+  return {dotShape[0] / mfmaShape[0], dotShape[1] / mfmaShape[1],
+          dotShape[2] / mfmaShape[2]};
+}
+
 unsigned getCyclesPerMfma(DotOp dotOp) {
   // Get mfma op type.
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
@@ -105,11 +165,11 @@ SmallVector<unsigned, 3> getMfmasPerRep(const ArrayRef<int64_t> &ctaTile,
       static_cast<unsigned>(repTile[2] / mfmaShape[2])};
   LDBG("mfmasPerRep: " << mfmasPerRep[0] << "x" << mfmasPerRep[1] << "x"
                        << mfmasPerRep[2]);
-  if (mfmasPerRep[0] < 1 || mfmasPerRep[1] < 1 || mfmasPerRep[2] < 1) {
-    llvm::errs() << "DotTiling::getMfmasPerRep() - Invalid combination of "
-                    "ctaTile, warpsPerCta and mfmaShape.\n";
-    return SmallVector<unsigned, 3>({1, 1, 1});
-  }
+  // It is valid for a cta or warp tile to be so small that it doesn't
+  // fully utilize an mfma op. Therefore we round up numReps.
+  mfmasPerRep[0] = std::max(1U, mfmasPerRep[0]);
+  mfmasPerRep[1] = std::max(1U, mfmasPerRep[1]);
+  mfmasPerRep[2] = std::max(1U, mfmasPerRep[2]);
   return mfmasPerRep;
 }
 
