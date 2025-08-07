@@ -49,6 +49,13 @@ namespace ttg = mlir::triton::gpu;
 
 namespace {
 
+Operation *createSetPrio(OpBuilder &rewriter, Location loc,
+                              int32_t prioValue) {
+  IntegerAttr prio =
+      rewriter.getI32IntegerAttr(static_cast<int32_t>(prioValue));
+  return rewriter.create<ROCDL::SetPrioOp>(loc, prioValue);
+}
+
 // TODO (ravil): Note, took function from `SchedInstructions.cpp`.
 // we need to combine these two implementations
 Operation *createSchedBarrier(OpBuilder &rewriter, Location loc,
@@ -1878,6 +1885,86 @@ struct SchedHeuristicOriginalOrder
 };
 
 /*
+  After scheduling the mlirBlock, we place setprio to achieve
+  higher multi-wave performance.
+  This applies when there are multiple waves / simd.
+*/
+enum class SetPrioStrategy {
+  None,
+  DotHighLow
+};
+struct ApplySetPrio {
+  ApplySetPrio(SchedDag &dag, OpBuilder &builder)
+      : dag(dag), builder(builder) {}
+  const int32_t highPriority = 3;
+  const int32_t lowPriority = 0;
+
+  /*
+    Setprio high before first mfma of dot, and low after last mfma of dot.
+    This works well for non-pingpong FA on mi300X with 4 waves/wg and 2 waves/wg,
+    as it keeps one wg's mfmas overlapped with the other wg's softmax.
+  */
+  void applySetPrioDotHighLow() {
+    dag.nodeList.reserve(dag.nodeList.size() + 16);
+    // TopDown
+    SetVector<int32_t> dotIds;
+    for (SchedDagNodeList::iterator it = std::next(dag.nodeList.begin()); it != dag.nodeList.end(); ++it) {
+      SchedDagNode *node = *it;
+      if (nodeCategoryDot(node)) {
+        Operation *op = node->getOp();
+        if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+                triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          int32_t id = attr.getIdUnrefinedOp();
+          if (!dotIds.contains(id)) {
+            dotIds.insert(id);
+            // Set priority high before this dot.
+            Operation *insertOp = (*std::prev(it))->getOp();
+            builder.setInsertionPointAfter(insertOp);
+            auto setPrioOp = createSetPrio(builder, op->getLoc(), highPriority);
+            SchedDagNode *setPrioNode = new SchedDagNode(setPrioOp);
+            dag.nodeList.insert(it, setPrioNode);
+          }
+        }
+      }
+    }
+
+    // BottomUp
+    dotIds.clear();
+    for (SchedDagNodeList::reverse_iterator it = std::next(dag.nodeList.rbegin()); it != dag.nodeList.rend(); ++it) {
+      SchedDagNode *node = *it;
+      if (nodeCategoryDot(node)) {
+        Operation *op = node->getOp();
+        if (auto attr = op->getAttrOfType<triton::amdgpu::RefinedOpAttr>(
+                triton::amdgpu::RefinedOpAttr::getMnemonic())) {
+          int32_t id = attr.getIdUnrefinedOp();
+          if (!dotIds.contains(id)) {
+            dotIds.insert(id);
+            // Set priority high before this dot.
+            builder.setInsertionPointAfter(node->getOp());
+            auto setPrioOp = createSetPrio(builder, op->getLoc(), lowPriority);
+            SchedDagNode *setPrioNode = new SchedDagNode(setPrioOp);
+            dag.nodeList.insert(it.base(), setPrioNode);
+          }
+        }
+      }
+    }
+  }
+
+  // Select which set prio to apply.
+  void applySetPrioStrategy(SetPrioStrategy strategy) {
+    switch (strategy) {
+      case SetPrioStrategy::DotHighLow:
+      applySetPrioDotHighLow();
+      return;
+    }
+  }
+  
+
+  SchedDag &dag;
+  OpBuilder &builder;
+};
+
+/*
   After scheduling the mlirBlock, we place sched.barriers(mask) to convey
   certain scheduling constraints to LLVM. E.g., we know one of the Deps passes
   added deps between LocalLoads and Dots, therefore we iterate through
@@ -2119,12 +2206,20 @@ struct SchedManager {
     return selected;
   }
 
+  void applySetPrio() {
+    ApplySetPrio asp(dag, builder);
+    // TODO(dtanner) select strategy here based on wg and kernel.
+    // Note: it is valid to apply multiple strategies.
+    SetPrioStrategy strategy = SetPrioStrategy::DotHighLow;
+    asp.applySetPrioStrategy(strategy);
+  }
+
   void insertSchedBarriers() {
     ApplySchedBarriers asb(dag, builder);
     asb.insertSchedBarriers();
   }
 
-  SmallVector<Operation *> getOpList(bool applySchedBarriers = true) {
+  SmallVector<Operation *> getOpList() {
     SmallVector<Operation *> opList;
     for (auto node : dag.nodeList) {
       Operation *op = node->getOp();
@@ -2291,6 +2386,7 @@ struct TritonAMDGPURescheduleOps
                       "ls:dot, gl:dot");
                  schedManager.dag.dumpDotFormat(llvm::dbgs()););
     }
+    schedManager.applySetPrio();
     schedManager.insertSchedBarriers();
 
     // Copy scheduled order to basic block.
