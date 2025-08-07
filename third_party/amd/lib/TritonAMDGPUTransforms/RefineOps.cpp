@@ -1363,25 +1363,35 @@ struct TritonAMDGPURefineOps
     }
 
     RewritePatternSet primaryPatterns(context);
+#if 1
     primaryPatterns.add<LocalAllocOpPattern>(context, refinedOpAttrTracker,
                                              /*benefit=*/1);
+#endif
     walkAndApplyPatterns(func, std::move(primaryPatterns));
 
     RewritePatternSet patterns(context);
-    patterns.add<LocalLoadOpPattern>(context, refinedOpAttrTracker,
+    /*flash-attention.py:185:25: error: We don't support splitting along the swizzling
+        tensor = tl.load(ptrs)
+        lib/Dialect/TritonGPU/IR/Ops.cpp
+        LogicalResult MemDescSubviewOp::verify() {
+        */
+    patterns.add<LocalLoadOpPattern>(context, refinedOpAttrTracker, // broken
                                      /*benefit=*/1);
-    patterns.add<DotOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
-    patterns.add<LoadOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
-    patterns.add<AMDGCNBufferLoadOp>(context, refinedOpAttrTracker,
-                                     /*benefit=*/1);
-    patterns.add<LocalStoreOpPattern>(context, refinedOpAttrTracker,
-                                      /*benefit=*/1);
-    patterns.add<ReduceOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1);
-    patterns.add<ExpandDimsOpPattern>(context, refinedOpAttrTracker,
-                                      /*benefit=*/1);
-    patterns.add<BroadcastOpPattern>(context, refinedOpAttrTracker,
+    patterns.add<DotOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1); // works
+    patterns.add<LoadOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1); // works
+    patterns.add<AMDGCNBufferLoadOp>(context, refinedOpAttrTracker, // works
                                      /*benefit=*/1);
 
+    patterns.add<LocalStoreOpPattern>(context, refinedOpAttrTracker, // works
+                                      /*benefit=*/1);
+    patterns.add<ReduceOpPattern>(context, refinedOpAttrTracker, /*benefit=*/1); // works
+    /*flash-attention.py:314:29: error: Register basis must match on a CTA tile between source and destination.
+        qk = qk * QK_SCALE - m_ij_scaled[:, None]*/
+    //patterns.add<ExpandDimsOpPattern>(context, refinedOpAttrTracker, // broken
+    //                                  /*benefit=*/1);
+    //patterns.add<BroadcastOpPattern>(context, refinedOpAttrTracker, // broken
+    //                                 /*benefit=*/1);
+    // broken above
     GranularityType granType;
     if (granularity == "small_tile") {
       granType = GranularityType::SMALL;
@@ -1393,6 +1403,7 @@ struct TritonAMDGPURefineOps
       return signalPassFailure();
     }
 
+#if 1
     // Elementwise patterns
 #define REFINE_ELEMENTWISE_OP(OP_TYPE)                                         \
   patterns.add<ElementWiseOpPattern<OP_TYPE>>(context, refinedOpAttrTracker,   \
@@ -1437,7 +1448,9 @@ struct TritonAMDGPURefineOps
     REFINE_ELEMENTWISE_OP(triton::gpu::ConvertLayoutOp)
 
 #undef REFINE_ELEMENTWISE_OP
+#endif
     walkAndApplyPatterns(func, std::move(patterns));
+    LDBG("TritonAMDGPURefineOps::runOnOperation() - DONE");
   }
 };
 

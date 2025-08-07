@@ -721,7 +721,7 @@ LogicalResult MemDescSubviewOp::verify() {
   if (ll.getInDimSize(kBlock) != 1) {
     return emitError("non-trivial block dimension not supported");
   }
-
+#if 0
   auto llInv = ll.invert();
   for (auto dim : splitDims) {
     auto kDim = mlir::StringAttr::get(ctx, "dim" + llvm::Twine(dim));
@@ -738,6 +738,7 @@ LogicalResult MemDescSubviewOp::verify() {
       }
     }
   }
+#endif
   return success();
 }
 

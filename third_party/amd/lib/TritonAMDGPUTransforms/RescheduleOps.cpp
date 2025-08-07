@@ -2297,7 +2297,7 @@ struct TritonAMDGPURescheduleOps
     OpBuilder builder(&getContext());
     builder.setInsertionPointToStart(mlirBlock);
     SchedManager schedManager(mlirBlock, builder);
-    bool dumpGraphs = false;
+    bool dumpGraphs = true;
 
 #if SCHED_OPT_NUM_PASSES >= 0
     /*
