@@ -545,6 +545,12 @@ struct SchedDag {
     assert(false);
   }
 
+  ~SchedDag() {
+    for (SchedDagNode *node : nodeList) {
+      delete node;
+    }
+  }
+
   void addOp(Operation *op) {
     SchedDagNode *node = new SchedDagNode(op);
     nodeMap.insert({op, node});
@@ -806,12 +812,6 @@ struct SchedDag {
     return out;
   }
 
-  ~SchedDag() {
-    for (SchedDagNode *node : nodeList) {
-      delete node;
-    }
-  }
-
   SchedDagNodeList nodeList;
   DepMap deps;
   OpNodeMap nodeMap;
@@ -824,6 +824,7 @@ struct SchedDag {
 ******************************************************************************/
 struct DependencyCalculator {
   DependencyCalculator(StringRef depTypeName) : depTypeName(depTypeName) {}
+  virtual ~DependencyCalculator() = default;
 
   virtual void calcDeps() = 0;
 
@@ -835,7 +836,6 @@ struct DependencyCalculator {
     calcDeps();
     dag->addDeps(depTypeName, depSet);
   }
-  virtual ~DependencyCalculator() = default;
 
   StringRef depTypeName;
   SchedDag *dag;
@@ -1589,6 +1589,7 @@ SchedDagNode *getOriginalOrder(SchedDagNode *a, SchedDagNode *b) {
 struct PriorityCalculator {
   PriorityCalculator(SchedDagNodePriorityType priorityType)
       : priorityType(priorityType) {}
+  virtual ~PriorityCalculator() = default;
 
   virtual void calcPriorities() = 0;
 
@@ -1598,7 +1599,6 @@ struct PriorityCalculator {
     dag = inputDag;
     calcPriorities();
   }
-  virtual ~PriorityCalculator() = default;
 
   SchedDagNodePriorityType priorityType;
   SchedDag *dag;
@@ -1730,10 +1730,11 @@ struct LocalStoreCriticalPathPriorityCalculator : public PriorityCalculator {
 */
 template <SchedDirection Direction> struct SchedHeuristic {
   SchedHeuristic(StringRef name) : name(name) {}
+  virtual ~SchedHeuristic() = default;
   // Scheduler prints the name of heuristic.
   StringRef getName() const { return name; }
-  // Scheduler calls before beginning a scheduling pass.
-  virtual void begin() {};
+  // Scheduler calls before starting a scheduling pass.
+  virtual void start() {};
   // Scheduler calls comparison functor to evaluate ready list.
   virtual SchedDagNode *operator()(SchedDagNode *a, SchedDagNode *b) = 0;
   // Scheduler calls this printer right before evaluating the ready list,
@@ -1742,8 +1743,7 @@ template <SchedDirection Direction> struct SchedHeuristic {
   // Scheduler allows heuristic to update state based on scheduled op.
   virtual void selectedOp(SchedDagNode *) {};
   // Scheduler notifies scheduling is done, for debugging to print final state.
-  virtual void end() {};
-  virtual ~SchedHeuristic() = default;
+  virtual void stop() {};
   StringRef name;
 };
 
@@ -1802,7 +1802,7 @@ struct SchedHeuristicMachineModel : public SchedHeuristic<Direction> {
         model(std::make_shared<MachineModelGFX942>()),
         machine(model.get(), Direction == SchedDirection::TopDown) {}
 
-  void begin() {
+  void start() {
     machine.reset();
     scheduleCycles.clear();
   };
@@ -1847,7 +1847,7 @@ struct SchedHeuristicMachineModel : public SchedHeuristic<Direction> {
 
   void dump(llvm::raw_ostream &out) { out << "MachineState: " << machine; };
 
-  void end() {
+  void stop() {
     LDBG("Machine Schedule Cycles");
     for (auto entry : scheduleCycles) {
       LDBG("t=" << entry.second << " " << *entry.first);
@@ -2034,7 +2034,7 @@ struct SchedManager {
          << rescheduleId << "), Direction="
          << ((Direction == SchedDirection::TopDown) ? "TopDown" : "BottomUp")
          << ", Heuristic=" << heuristic->getName());
-    const bool printDetails = false; // rescheduleId >= 1;
+    const bool printDetails = false;
     // Reset deps right before rescheduling b/c analysis passes may have altered
     // them.
     dag.resetDeps();
@@ -2044,7 +2044,7 @@ struct SchedManager {
     }
     // Node readiness is based on direction.
     dag.initReadyNodes<Direction>();
-    heuristic->begin();
+    heuristic->start();
 
     // Schedule the dag; this process removes deps from nodes.
     // Store nodes in newly scheduled order.
@@ -2052,7 +2052,7 @@ struct SchedManager {
     for (int iter = 0; !dag.finished(); ++iter) {
       scheduleNextOp<Direction>(heuristic, rescheduledNodes, printDetails);
     }
-    heuristic->end();
+    heuristic->stop();
 
     // After scheduling, re-apply deps to prepare for adding additional deps.
     dag.resetDeps();
