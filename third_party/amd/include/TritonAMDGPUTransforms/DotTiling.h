@@ -116,6 +116,7 @@ uint32_t getCyclesPerAsm(DotOp dotOp) {
     return getCyclesPerMfma(dotOp);
   }
   // TODO(dtanner) add wmma
+  return 0;
 }
 
 /*
