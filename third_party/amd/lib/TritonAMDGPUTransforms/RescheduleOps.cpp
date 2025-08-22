@@ -1976,6 +1976,8 @@ struct ApplySetPrio {
       case SetPrioStrategy::DotHighLow:
       applySetPrioDotHighLow();
       return;
+      case SetPrioStrategy::None:
+      return;
     }
   }
   
